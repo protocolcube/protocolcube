@@ -1,0 +1,17 @@
+export const common = {
+  "locale.label": "Language",
+  "locale.en": "English",
+  "locale.zh-CN": "Simplified Chinese",
+  "appearance.label": "Appearance",
+  "appearance.light": "Light",
+  "appearance.dark": "Dark",
+  "appearance.system": "System",
+  "common.help": "Help",
+  "common.cancel": "Cancel",
+  "common.close": "Close",
+  "common.copy": "Copy",
+  "common.download": "Download",
+  "common.forget": "Forget",
+  "common.unavailable": "Unavailable",
+  "common.select": "Select…",
+} as const;

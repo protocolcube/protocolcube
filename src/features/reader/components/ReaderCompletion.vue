@@ -1,0 +1,22 @@
+<script setup lang="ts">
+import { computed, ref } from "vue";
+import { storeToRefs } from "pinia";
+import { useReaderStore, isReaderActionFailure } from "@/features/reader/store";
+import AccessibleDialog from "@/components/shared/AccessibleDialog.vue";
+import { Button } from "@/components/ui/button";
+import { locale, t, type TranslationKey, type TranslationParams } from "@/locales";
+const emit = defineEmits<{ exitPreview: []; status: [key: TranslationKey, params?: TranslationParams] }>();
+const readerStore = useReaderStore();
+const { completionSummary, isPreview, protocol, snapshot } = storeToRefs(readerStore);
+const clearSessionRequested = ref(false);
+const summaryVariables = computed(() => completionSummary.value === undefined ? [] : protocol.value?.variables.filter((definition) => completionSummary.value?.values[definition.id] !== undefined).map((definition) => ({ id: definition.id, label: definition.label, value: completionSummary.value?.values[definition.id] })) ?? []);
+const summarySections = computed(() => completionSummary.value === undefined ? [] : protocol.value?.sections.filter((section) => completionSummary.value?.completedSectionIds.includes(section.sectionId)) ?? []);
+function formatUtc(value: number): string { return new Intl.DateTimeFormat(locale.value, { dateStyle: "medium", timeStyle: "medium", timeZone: "UTC" }).format(value); }
+function printSummary(): void { window.print(); }
+function confirmClearSession(): void { clearSessionRequested.value = false; try { readerStore.resetSession(); emit("status", isPreview.value ? "reader.status.previewReset" : "reader.status.sessionCleared"); } catch (error) { if (isReaderActionFailure(error)) { emit("status", "reader.status.actionFailed"); return; } throw error; } }
+</script>
+<template>
+  <section v-if="snapshot.mode === 'completed' && isPreview" class="completion-workbench preview-completion" aria-labelledby="preview-completion-title"><p>{{ t("reader.frame.previewBadge") }}</p><h2 id="preview-completion-title">{{ t("reader.completion.previewTitle") }}</h2><p>{{ t("reader.completion.previewBody") }}</p><Button type="button" variant="outline" @click="emit('exitPreview')">{{ t("reader.action.exitPreview") }}</Button></section>
+  <section v-else-if="snapshot.mode === 'completed'" class="completion-workbench" aria-labelledby="summary-title"><header class="completion-heading"><div><p>{{ t("reader.completion.nonAudit") }}</p><h2 id="summary-title">{{ t("reader.completion.title") }}</h2></div><strong>{{ t("reader.completion.warning") }}</strong></header><template v-if="completionSummary"><dl class="summary-metadata"><div><dt>{{ t("reader.completion.fingerprint") }}</dt><dd>{{ completionSummary.protocolFingerprint }}</dd></div><div><dt>{{ t("reader.completion.started") }}</dt><dd>{{ formatUtc(completionSummary.startedAtUtc) }}</dd></div><div><dt>{{ t("reader.completion.completed") }}</dt><dd>{{ formatUtc(completionSummary.completedAtUtc) }}</dd></div></dl><div class="summary-columns"><section aria-labelledby="summary-values-title"><h3 id="summary-values-title">{{ t("reader.completion.values") }}</h3><p v-if="summaryVariables.length === 0">{{ t("reader.completion.noValues") }}</p><dl v-else><div v-for="item in summaryVariables" :key="item.id"><dt>{{ item.label }}</dt><dd>{{ item.value }}</dd></div></dl></section><section aria-labelledby="summary-sections-title"><h3 id="summary-sections-title">{{ t("reader.completion.sections") }}</h3><ol><li v-for="(section, index) in summarySections" :key="section.sectionId"><span>{{ String(index + 1).padStart(2, "0") }}</span>{{ section.title }}</li></ol></section></div></template><footer class="completion-actions"><Button type="button" variant="outline" @click="printSummary">{{ t("reader.action.print") }}</Button><Button type="button" variant="destructive" @click="clearSessionRequested = true">{{ t("reader.action.clearSession") }}</Button></footer></section>
+  <AccessibleDialog v-if="clearSessionRequested" id="clear-session-dialog" :title="isPreview ? t('reader.previewReset.title') : t('reader.clear.title')" :confirm-label="isPreview ? t('reader.previewReset.confirm') : t('reader.clear.confirm')" :cancel-label="t('common.cancel')" @confirm="confirmClearSession" @cancel="clearSessionRequested = false"><div class="reader-feature-scope"><p>{{ isPreview ? t("reader.previewReset.body") : t("reader.clear.body") }}</p></div></AccessibleDialog>
+</template>

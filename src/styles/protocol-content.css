@@ -1,0 +1,210 @@
+.protocol-content {
+  min-width: 0;
+  color: var(--foreground);
+  font-family:
+    ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    "Noto Sans CJK SC", "Microsoft YaHei", "PingFang SC", sans-serif;
+  font-size: 1rem;
+  line-height: 1.75;
+  overflow-wrap: anywhere;
+}
+
+.protocol-content .tiptap {
+  box-sizing: border-box;
+  min-width: 0;
+  outline: none;
+}
+
+.protocol-content .tiptap > :first-child {
+  margin-top: 0;
+}
+
+.protocol-content .tiptap > :last-child {
+  margin-bottom: 0;
+}
+
+.protocol-content .tiptap p {
+  margin: 0.85rem 0;
+}
+
+.protocol-content .tiptap h1,
+.protocol-content .tiptap h2,
+.protocol-content .tiptap h3,
+.protocol-content .tiptap h4,
+.protocol-content .tiptap h5,
+.protocol-content .tiptap h6 {
+  margin: 1.7em 0 0.65em;
+  font-family: inherit;
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  line-height: 1.25;
+}
+
+.protocol-content .tiptap h1 {
+  font-size: 2rem;
+}
+
+.protocol-content .tiptap h2 {
+  padding-bottom: 0.35rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 1.65rem;
+}
+
+.protocol-content .tiptap h3 {
+  font-size: 1.4rem;
+}
+
+.protocol-content .tiptap h4 {
+  font-size: 1.22rem;
+}
+
+.protocol-content .tiptap h5 {
+  font-size: 1.08rem;
+}
+
+.protocol-content .tiptap h6 {
+  color: var(--muted-foreground);
+  font-size: 1rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.protocol-content .tiptap ul:not([data-type="taskList"]),
+.protocol-content .tiptap ol {
+  padding-left: 1.75rem;
+  margin: 1rem 0;
+}
+
+.protocol-content .tiptap ul:not([data-type="taskList"]) {
+  list-style: disc;
+}
+
+.protocol-content .tiptap ol {
+  list-style: decimal;
+}
+
+.protocol-content .tiptap li {
+  margin: 0.3rem 0;
+}
+
+.protocol-content .tiptap ul[data-type="taskList"] {
+  padding: 0;
+  margin: 1rem 0;
+  list-style: none;
+}
+
+.protocol-content .tiptap ul[data-type="taskList"] li {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+}
+
+.protocol-content .tiptap ul[data-type="taskList"] li > label {
+  display: flex;
+  min-height: 1.75rem;
+  flex: 0 0 1rem;
+  align-items: center;
+  margin: 0;
+  cursor: pointer;
+}
+
+.protocol-content .tiptap ul[data-type="taskList"] li > label input {
+  box-sizing: border-box;
+  width: 1rem;
+  height: 1rem;
+  flex: 0 0 1rem;
+  padding: 0;
+  margin: 0;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+
+.protocol-content .tiptap ul[data-type="taskList"] li > div {
+  min-width: 0;
+  flex: 1;
+}
+
+.protocol-content .tiptap ul[data-type="taskList"] li > div > p:first-child {
+  margin-top: 0;
+}
+
+.protocol-content .tiptap blockquote {
+  padding-left: 1rem;
+  margin: 1.25rem 0;
+  border-left: 3px solid var(--primary);
+  color: var(--muted-foreground);
+}
+
+.protocol-content .tiptap code {
+  padding: 0.15em 0.35em;
+  border-radius: 0.3rem;
+  background: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.9em;
+}
+
+.protocol-content .tiptap pre {
+  overflow-x: auto;
+  padding: 1rem;
+  border-radius: var(--radius);
+  background: var(--muted);
+}
+
+.protocol-content .tiptap pre code {
+  padding: 0;
+  background: transparent;
+}
+
+.protocol-content .tiptap a {
+  color: var(--primary);
+  text-decoration: underline;
+  text-decoration-thickness: 0.08em;
+  text-underline-offset: 0.2em;
+}
+
+.protocol-content .tableWrapper {
+  max-width: 100%;
+  margin: 1.5rem 0;
+  overflow-x: auto;
+}
+
+.protocol-content .tiptap table {
+  width: 100%;
+  min-width: 40rem;
+  border-collapse: collapse;
+  table-layout: auto;
+  font-size: 0.92rem;
+}
+
+.protocol-content .tiptap th,
+.protocol-content .tiptap td {
+  min-width: 8rem;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--border);
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.protocol-content .tiptap th {
+  background: var(--muted);
+  font-weight: 650;
+  text-align: left;
+}
+
+.protocol-content .tiptap th:nth-child(2),
+.protocol-content .tiptap td:nth-child(2) {
+  min-width: 12rem;
+}
+
+.protocol-content .tiptap th:nth-child(n + 3),
+.protocol-content .tiptap td:nth-child(n + 3) {
+  min-width: 16rem;
+}
+
+.protocol-content .tiptap img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 1.5rem auto;
+  border-radius: var(--radius);
+}

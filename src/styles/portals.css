@@ -1,0 +1,11 @@
+/*
+ * Reka portals leave the application root. Keep their box-model contract here
+ * rather than coupling it to an Author, Reader, or Help feature root.
+ */
+:where(
+  [data-slot="dialog-content"],
+  [data-slot="popover-content"],
+  [data-slot="select-content"]
+) {
+  box-sizing: border-box;
+}
