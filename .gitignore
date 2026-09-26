@@ -1,7 +1,10 @@
+
 node_modules/
 dist/
 test-results/
 playwright-report/
 *.tsbuildinfo
-
+.agents
+docs
+skills-lock.json
 
