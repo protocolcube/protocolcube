@@ -111,7 +111,8 @@ function translatedError(error: ProtocolError): string {
   switch (error.code) {
     case "missing_input": case "missing_input_value": return t("reader.error.missingInput", { variable: errorSubject(error) });
     case "invalid_input": case "invalid_variable_constraints": case "invalid_variable_default": return t("reader.error.invalidInput", { variable: errorSubject(error) });
-    case "invalid_duration": case "invalid_duration_variable": return t("reader.error.invalidDuration");
+    case "invalid_duration": return t("reader.error.invalidDuration");
+    case "invalid_duration_variable": return t("reader.error.invalidDurationVariable");
     case "web_crypto_unavailable": return t("reader.error.webCrypto");
     case "invalid_playback_session": return t("reader.error.invalidSession");
     case "resource_limit": return t("reader.error.resourceLimit", { path });

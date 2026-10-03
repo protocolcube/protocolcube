@@ -907,6 +907,129 @@ describe("ReaderWorkspace", () => {
     });
   });
 
+  it("drives Section timers from configured Duration and Numeric Input Variables", async () => {
+    const protocol: Protocol = {
+      ...readerProtocol,
+      sections: [
+        {
+          ...readerProtocol.sections[0]!,
+          title: "Soak",
+          markdown: "Soak the sample.",
+          duration: { kind: "derived", variableId: "soakSeconds" },
+          endAction: "advance",
+        },
+        {
+          ...readerProtocol.sections[1]!,
+          title: "Incubate",
+          markdown: "Incubate the sample.",
+          duration: { kind: "derived", variableId: "legacySeconds" },
+        },
+      ],
+      variables: [
+        {
+          kind: "input",
+          id: "soakSeconds",
+          label: "Soak",
+          valueType: "duration",
+          unit: "second",
+          maximum: "700000",
+        },
+        {
+          kind: "input",
+          id: "legacySeconds",
+          label: "Legacy",
+          valueType: "numeric",
+        },
+      ],
+      formulaTestCases: [],
+    };
+    const keys = await ProtocolCore.generateAuthorKeyPair();
+    const signature = await ProtocolCore.signProtocol(
+      protocol,
+      keys.privateKey,
+      keys.publicKey,
+    );
+    const envelope = ProtocolCore.encodeEnvelope({
+      documentKind: "protocol-box/published-protocol",
+      formatVersion: 1,
+      appVersion: "0.0.0",
+      protocol,
+      signature,
+    });
+    const openDenied = () =>
+      ReaderWorkspace.open({
+        html: `<script id="protocol-box-data" type="application/octet-stream">${envelope}</script>`,
+        monotonicNow: () => 0,
+        wallNow: () => 0,
+        scheduler: {
+          setTimeout: () => 1,
+          clearTimeout: () => undefined,
+        },
+      });
+    const delays: number[] = [];
+    let scheduled: (() => void | Promise<void>) | undefined;
+    let now = 0;
+    const workspace = await ReaderWorkspace.open({
+      html: `<script id="protocol-box-data" type="application/octet-stream">${envelope}</script>`,
+      monotonicNow: () => now,
+      wallNow: () => now,
+      scheduler: {
+        setTimeout(callback, delay) {
+          scheduled = callback;
+          delays.push(delay);
+          return 1;
+        },
+        clearTimeout: () => undefined,
+      },
+    });
+
+    // A Duration Input Variable resolves to canonical seconds, so the Section
+    // timer reads it directly with no extra unit conversion and the same
+    // half-even millisecond rounding as Numeric references.
+    workspace.setInputValue("soakSeconds", "1.0005");
+    workspace.setInputValue("legacySeconds", "2.5");
+    workspace.startPlayback({ persistence: "memory" });
+    expect(workspace.snapshot()).toMatchObject({
+      mode: "playing",
+      remainingMilliseconds: 1_000, // 1.0005 s → 1000.5 ms rounds half-even
+    });
+    expect(() => workspace.completeCurrentSection()).toThrowError(
+      expect.objectContaining({ code: "timed_section_in_progress" }),
+    );
+    now = 1_000;
+    await scheduled?.();
+    expect(workspace.snapshot()).toMatchObject({
+      mode: "playing",
+      currentSectionIndex: 1,
+      remainingMilliseconds: 2_500,
+    });
+    expect(delays).toEqual([1_000, 2_500]);
+
+    // The resolved 1 s–7 days bound applies to both kinds: the Duration
+    // reference through its canonical seconds, the Numeric reference with
+    // unchanged value-means-seconds semantics.
+    const aboveBound = await openDenied();
+    aboveBound.setInputValue("soakSeconds", "700000");
+    aboveBound.setInputValue("legacySeconds", "700000");
+    expect(aboveBound.snapshot()).toMatchObject({
+      mode: "configuring",
+      errors: [
+        { code: "invalid_duration", path: "sections.0.duration" },
+        { code: "invalid_duration", path: "sections.1.duration" },
+      ],
+    });
+    const belowBound = await openDenied();
+    belowBound.setInputValue("soakSeconds", "0.5");
+    belowBound.setInputValue("legacySeconds", "0.9994");
+    expect(belowBound.snapshot()).toMatchObject({
+      mode: "configuring",
+      errors: [
+        { code: "invalid_duration", path: "sections.0.duration" },
+        { code: "invalid_duration", path: "sections.1.duration" },
+      ],
+    });
+  });
+
   it("requires confirmation for a manual Section jump without inferring completion", async () => {
     const jumpProtocol: Protocol = {
       ...readerProtocol,
@@ -1011,5 +1134,483 @@ describe("ReaderWorkspace", () => {
     const revised = await open(revisedProtocol, revisedSignature);
     expect(revised.restorePersistentSession()).toBe("none");
     expect(revised.snapshot()).toMatchObject({ mode: "configuring" });
+  });
+
+  it("resolves Duration Input Variable entries in the declared unit", async () => {
+    const protocol: Protocol = {
+      ...readerProtocol,
+      sections: [readerProtocol.sections[0]!],
+      variables: [
+        {
+          kind: "input",
+          id: "soakMinutes",
+          label: "Soak",
+          valueType: "duration",
+          unit: "minute",
+          defaultValue: "300",
+          minimum: "60",
+          maximum: "3600",
+        },
+      ],
+      formulaTestCases: [],
+    };
+    const keys = await ProtocolCore.generateAuthorKeyPair();
+    const signature = await ProtocolCore.signProtocol(
+      protocol,
+      keys.privateKey,
+      keys.publicKey,
+    );
+    const envelope = ProtocolCore.encodeEnvelope({
+      documentKind: "protocol-box/published-protocol",
+      formatVersion: 1,
+      appVersion: "0.0.0",
+      protocol,
+      signature,
+    });
+    const open = () =>
+      ReaderWorkspace.open({
+        html: `<script id="protocol-box-data" type="application/octet-stream">${envelope}</script>`,
+        monotonicNow: () => 0,
+        wallNow: () => 0,
+        scheduler: {
+          setTimeout: () => 1,
+          clearTimeout: () => undefined,
+        },
+      });
+
+    // The default is stored as canonical seconds and enters configuration in
+    // the declared unit (300 seconds prefills as 5 minutes).
+    const defaulted = await open();
+    expect(defaulted.snapshot()).toMatchObject({
+      mode: "ready",
+      values: { soakMinutes: "300" },
+      errors: [],
+    });
+
+    for (const entry of ["abc", "-1", "0.5", "120"]) {
+      const workspace = await open();
+      workspace.setInputValue("soakMinutes", entry);
+      expect(workspace.snapshot()).toMatchObject({
+        mode: "configuring",
+        errors: [
+          expect.objectContaining({
+            code: "invalid_input",
+            path: "values.soakMinutes",
+          }),
+        ],
+      });
+    }
+
+    const valid = await open();
+    valid.setInputValue("soakMinutes", "10");
+    expect(valid.snapshot()).toMatchObject({
+      mode: "ready",
+      values: { soakMinutes: "600" },
+      errors: [],
+    });
+  });
+
+  it("renders Duration Variables through the single formatter on every Reader surface", async () => {
+    const protocol: Protocol = {
+      ...readerProtocol,
+      sections: [
+        {
+          ...readerProtocol.sections[0]!,
+          sectionId: "018f7f3e-7b1d-7a91-bf10-8f767a9c0f74",
+          title: "Prepare {{ soakHours }} & record",
+          markdown:
+            "Soak **{{ soakHours }}** & confirm.\n\n- [ ] Confirm the soak.",
+          duration: { kind: "untimed" },
+          endAction: "advance",
+          completionRequirement: "all-task-items",
+        },
+        {
+          ...readerProtocol.sections[1]!,
+          sectionId: "018f7f3e-7b1d-7a91-bf10-8f767a9c0f75",
+          title: "Done",
+          markdown: "Complete.",
+          duration: { kind: "untimed" },
+          endAction: "wait",
+        },
+      ],
+      variables: [
+        {
+          kind: "input",
+          id: "soakHours",
+          label: "Soak",
+          valueType: "duration",
+          unit: "hour",
+          minimum: "1800",
+          maximum: "7200",
+        },
+      ],
+      formulaTestCases: [],
+    };
+    const keys = await ProtocolCore.generateAuthorKeyPair();
+    const signature = await ProtocolCore.signProtocol(
+      protocol,
+      keys.privateKey,
+      keys.publicKey,
+    );
+    const envelope = ProtocolCore.encodeEnvelope({
+      documentKind: "protocol-box/published-protocol",
+      formatVersion: 1,
+      appVersion: "0.0.0",
+      protocol,
+      signature,
+    });
+    const open = () =>
+      ReaderWorkspace.open({
+        html: `<script id="protocol-box-data" type="application/octet-stream">${envelope}</script>`,
+        monotonicNow: () => 0,
+        wallNow: () => 0,
+        scheduler: {
+          setTimeout: () => 1,
+          clearTimeout: () => undefined,
+        },
+      });
+
+    // Every surface renders exactly what the domain formatter renders for
+    // the stored canonical seconds.
+    const expected = ProtocolCore.formatDurationValue("5400", "hour");
+    expect(expected).toBe("1.5 h");
+
+    const workspace = await open();
+    workspace.setInputValue("soakHours", "1.5");
+    expect(workspace.snapshot()).toMatchObject({
+      mode: "ready",
+      // Resolved values stay canonical seconds...
+      values: { soakHours: "5400" },
+      errors: [],
+    });
+    workspace.startPlayback({ persistence: "memory" });
+    // ...while step-text interpolation renders the formatted declared-unit
+    // value. The HTML and Markdown escaping still runs over the formatted
+    // result after formatting (a no-op on plain decimals and unit symbols),
+    // and template text outside `{{ id }}` is untouched.
+    expect(workspace.snapshot()).toMatchObject({
+      mode: "playing",
+      renderedSection: {
+        title: "Prepare 1.5 h & record",
+        markdown:
+          "Soak **1.5 h** & confirm.\n\n- [ ] Confirm the soak.",
+      },
+    });
+
+    workspace.setTaskItemChecked(0, true);
+    workspace.completeCurrentSection();
+    workspace.completeCurrentSection();
+    const summary = workspace.completionSummary();
+    // The Completion Summary keeps the canonical resolved Variable Value in
+    // `values` (5400 canonical seconds) and carries the formatted string in
+    // the presented record, which `text` prints.
+    expect(summary.values.soakHours).toBe("5400");
+    expect(summary.presentedValues.soakHours).toBe("1.5 h");
+    expect(summary.text).toContain("soakHours: 1.5 h");
+
+    // The Author Preview renders the same formatted text.
+    const preview = await ReaderWorkspace.openAuthorPreview({
+      protocol,
+      monotonicNow: () => 0,
+      wallNow: () => 0,
+      scheduler: {
+        setTimeout: () => 1,
+        clearTimeout: () => undefined,
+      },
+    });
+    preview.setInputValue("soakHours", "1.5");
+    preview.startPlayback({ persistence: "memory" });
+    expect(preview.snapshot()).toMatchObject({
+      mode: "playing",
+      renderedSection: {
+        title: "Prepare 1.5 h & record",
+        markdown:
+          "Soak **1.5 h** & confirm.\n\n- [ ] Confirm the soak.",
+      },
+    });
+  });
+
+  it("resolves Duration Derived Variable values into canonical seconds", async () => {
+    const protocol: Protocol = {
+      ...readerProtocol,
+      sections: [readerProtocol.sections[0]!],
+      variables: [
+        {
+          kind: "input",
+          id: "soakHours",
+          label: "Soak",
+          valueType: "duration",
+          unit: "hour",
+        },
+        {
+          kind: "derived",
+          id: "doubledMinutes",
+          label: "Doubled soak",
+          valueType: "duration",
+          unit: "minute",
+          formula: "soakHours * 2",
+          precision: 2,
+          roundingMode: "half-even",
+        },
+      ],
+      formulaTestCases: [
+        {
+          testCaseId: "018f7f3e-7b1d-7a91-bf10-8f767a9c0f75",
+          name: "Doubles the soak",
+          inputValues: { soakHours: "1" },
+          expectedDerivedValues: { doubledMinutes: "7200" },
+          precision: 2,
+          roundingMode: "half-even",
+        },
+      ],
+    };
+    const keys = await ProtocolCore.generateAuthorKeyPair();
+    const signature = await ProtocolCore.signProtocol(
+      protocol,
+      keys.privateKey,
+      keys.publicKey,
+    );
+    const envelope = ProtocolCore.encodeEnvelope({
+      documentKind: "protocol-box/published-protocol",
+      formatVersion: 1,
+      appVersion: "0.0.0",
+      protocol,
+      signature,
+    });
+    const workspace = await ReaderWorkspace.open({
+      html: `<script id="protocol-box-data" type="application/octet-stream">${envelope}</script>`,
+      monotonicNow: () => 0,
+      wallNow: () => 0,
+      scheduler: {
+        setTimeout: () => 1,
+        clearTimeout: () => undefined,
+      },
+    });
+    expect(workspace.snapshot()).toMatchObject({ mode: "configuring" });
+
+    // The declared-unit entry (1 hour) resolves to canonical seconds and the
+    // Duration Derived Variable evaluates through the same engine into
+    // canonical seconds, consumable by timers and summaries.
+    workspace.setInputValue("soakHours", "1");
+    expect(workspace.snapshot()).toMatchObject({
+      mode: "ready",
+      values: { soakHours: "3600", doubledMinutes: "7200" },
+      errors: [],
+    });
+
+    workspace.setInputValue("soakHours", "1.5");
+    expect(workspace.snapshot()).toMatchObject({
+      mode: "ready",
+      values: { soakHours: "5400", doubledMinutes: "10800" },
+      errors: [],
+    });
+  });
+
+  it("renders a Duration Derived Variable through the formatter on every Reader surface", async () => {
+    const protocol: Protocol = {
+      ...readerProtocol,
+      sections: [
+        {
+          ...readerProtocol.sections[0]!,
+          sectionId: "018f7f3e-7b1d-7a91-bf10-8f767a9c0f76",
+          title: "Prepare {{ soakHours }}",
+          markdown: "Soak **{{ soakHours }}**.\n\n- [ ] Confirm the soak.",
+          duration: { kind: "untimed" },
+          endAction: "advance",
+          completionRequirement: "all-task-items",
+        },
+        {
+          ...readerProtocol.sections[1]!,
+          sectionId: "018f7f3e-7b1d-7a91-bf10-8f767a9c0f77",
+          title: "Done",
+          markdown: "Complete.",
+          duration: { kind: "untimed" },
+          endAction: "wait",
+        },
+      ],
+      variables: [
+        {
+          kind: "input",
+          id: "soakMinutes",
+          label: "Soak",
+          valueType: "duration",
+          unit: "minute",
+        },
+        {
+          kind: "derived",
+          id: "soakHours",
+          label: "Soak in hours",
+          valueType: "duration",
+          unit: "hour",
+          formula: "soakMinutes",
+          precision: 2,
+          roundingMode: "half-even",
+        },
+      ],
+      formulaTestCases: [
+        {
+          testCaseId: "018f7f3e-7b1d-7a91-bf10-8f767a9c0f78",
+          name: "Converts the declared minutes into declared hours",
+          inputValues: { soakMinutes: "90" },
+          expectedDerivedValues: { soakHours: "5400" },
+          precision: 2,
+          roundingMode: "half-even",
+        },
+      ],
+    };
+    const keys = await ProtocolCore.generateAuthorKeyPair();
+    const signature = await ProtocolCore.signProtocol(
+      protocol,
+      keys.privateKey,
+      keys.publicKey,
+    );
+    const envelope = ProtocolCore.encodeEnvelope({
+      documentKind: "protocol-box/published-protocol",
+      formatVersion: 1,
+      appVersion: "0.0.0",
+      protocol,
+      signature,
+    });
+    const workspace = await ReaderWorkspace.open({
+      html: `<script id="protocol-box-data" type="application/octet-stream">${envelope}</script>`,
+      monotonicNow: () => 0,
+      wallNow: () => 0,
+      scheduler: {
+        setTimeout: () => 1,
+        clearTimeout: () => undefined,
+      },
+    });
+    workspace.setInputValue("soakMinutes", "90");
+    expect(workspace.snapshot()).toMatchObject({
+      mode: "ready",
+      // The Derived duration Variable Value stays canonical seconds...
+      values: { soakMinutes: "5400", soakHours: "5400" },
+      errors: [],
+    });
+    workspace.startPlayback({ persistence: "memory" });
+    // ...while `{{ soakHours }}` interpolates the domain formatter output in
+    // the Derived Variable's declared unit (5400 s in hours is `1.5 h`).
+    expect(workspace.snapshot()).toMatchObject({
+      mode: "playing",
+      renderedSection: {
+        title: "Prepare 1.5 h",
+        markdown: "Soak **1.5 h**.\n\n- [ ] Confirm the soak.",
+      },
+    });
+
+    workspace.setTaskItemChecked(0, true);
+    workspace.completeCurrentSection();
+    workspace.completeCurrentSection();
+    const summary = workspace.completionSummary();
+    // Canonical seconds stay in `values` while the presented record renders
+    // the Derived Variable's declared unit through the domain formatter.
+    expect(summary.values.soakHours).toBe("5400");
+    expect(summary.presentedValues.soakHours).toBe("1.5 h");
+    expect(summary.text).toContain("soakHours: 1.5 h");
+  });
+
+  it("persists and restores a Playback Session with a Duration Input Variable", async () => {
+    const protocol: Protocol = {
+      ...readerProtocol,
+      sections: [
+        {
+          ...readerProtocol.sections[0]!,
+          title: "Soak",
+          markdown: "Soak the sample.\n\n- [ ] Confirm the soak.",
+          duration: { kind: "untimed" },
+          endAction: "advance",
+          completionRequirement: "all-task-items",
+        },
+        {
+          ...readerProtocol.sections[1]!,
+          markdown: "Wait for the timer.",
+        },
+      ],
+      variables: [
+        {
+          kind: "input",
+          id: "soakMinutes",
+          label: "Soak",
+          valueType: "duration",
+          unit: "minute",
+          minimum: "60",
+          maximum: "3600",
+        },
+      ],
+      formulaTestCases: [],
+    };
+    const keys = await ProtocolCore.generateAuthorKeyPair();
+    const signature = await ProtocolCore.signProtocol(
+      protocol,
+      keys.privateKey,
+      keys.publicKey,
+    );
+    const envelope = ProtocolCore.encodeEnvelope({
+      documentKind: "protocol-box/published-protocol",
+      formatVersion: 1,
+      appVersion: "0.0.0",
+      protocol,
+      signature,
+    });
+    const stored = new Map<string, string>();
+    const sessionStorage = {
+      getItem: (key: string) => stored.get(key) ?? null,
+      setItem: (key: string, value: string) => stored.set(key, value),
+      removeItem: (key: string) => stored.delete(key),
+      keys: () => [...stored.keys()],
+    };
+    const options = {
+      html: `<script id="protocol-box-data" type="application/octet-stream">${envelope}</script>`,
+      monotonicNow: () => 0,
+      wallNow: () => 1_700_000_000_000,
+      scheduler: {
+        setTimeout: () => 1,
+        clearTimeout: () => undefined,
+      },
+      sessionStorage,
+    };
+
+    const first = await ReaderWorkspace.open(options);
+    first.setInputValue("soakMinutes", "10");
+    first.startPlayback({
+      persistence: "persistent",
+      sensitiveDataConfirmed: true,
+    });
+    first.setTaskItemChecked(0, true);
+    first.completeCurrentSection();
+
+    const restored = await ReaderWorkspace.open(options);
+    expect(restored.restorePersistentSession()).toBe("restored");
+    expect(restored.snapshot()).toMatchObject({
+      mode: "paused",
+      reason: "page-visible",
+      currentSectionIndex: 1,
+      values: { soakMinutes: "600" },
+    });
+
+    // A stored Duration Variable Value is canonical seconds: it must still
+    // satisfy the definition's constraints, or the Session quarantines.
+    const fingerprint = restored.inspection().protocolFingerprint!;
+    const activeKey = `protocol-box:playback:${fingerprint}`;
+    const session = JSON.parse(stored.get(activeKey)!) as Record<
+      string,
+      unknown
+    >;
+    stored.set(
+      activeKey,
+      JSON.stringify({
+        ...session,
+        values: {
+          ...(session.values as Record<string, unknown>),
+          soakMinutes: "5",
+        },
+      }),
+    );
+    const quarantined = await ReaderWorkspace.open(options);
+    expect(quarantined.restorePersistentSession()).toBe("quarantined");
+    expect(quarantined.snapshot()).toMatchObject({
+      mode: "quarantined",
+      protocolFingerprint: fingerprint,
+    });
   });
 });

@@ -171,6 +171,8 @@ export const reader = {
   "reader.error.missingInput": "请为 {variable} 设置变量值。",
   "reader.error.invalidInput": "{variable} 的变量值不符合声明的类型或约束。",
   "reader.error.invalidDuration": "解析后的步骤时长必须在 1 秒到 7 天之间。",
+  "reader.error.invalidDurationVariable": "步骤时长必须引用数值变量或时长变量。",
+  "reader.error.invalidDurationUnit": "{variable} 声明的时长单位不受支持。",
   "reader.error.webCrypto": "Web Crypto 不可用；无法检查签名匹配。",
   "reader.error.invalidSession": "已存导引会话包含无效或不可能的进度。",
   "reader.error.resourceLimit": "{path} 超出了实验规程资源限制。",

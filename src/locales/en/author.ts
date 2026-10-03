@@ -175,10 +175,26 @@ export const author = {
   "author.section.taskItemsDetected": "{count} checklist items detected.",
   "author.section.taskItemsRequired":
     "Add at least one checklist item before enabling this requirement.",
+  "author.section.timerVariable": "Timer Variable",
+  "author.section.durationCandidate.numeric": "numeric",
+  "author.section.durationCandidate.duration": "{unit} (duration)",
+  "author.section.durationCandidate.derived": "derived",
   "author.formulaTest.title": "Title",
   "author.formulaTest.description": "Description",
   "author.formulaTest.descriptionPlaceholder":
     "Explain the scenario or boundary this test covers.",
+  "author.variable.kind.duration": "Duration Input",
+  "author.variable.kind.durationDerived": "Duration Derived",
+  "author.variable.unit": "Unit",
+  "author.variable.durationUnit.second": "Second (s)",
+  "author.variable.durationUnit.minute": "Minute (min)",
+  "author.variable.durationUnit.hour": "Hour (h)",
+  "author.variable.durationUnit.day": "Day (d)",
+  "author.variable.defaultValue": "Default",
+  "author.variable.minimum": "Minimum",
+  "author.variable.maximum": "Maximum",
+  "author.variable.invalidDurationEntry":
+    "Default, Minimum, and Maximum must be decimal numbers entered in the selected Duration Unit.",
   "author.publish.eyebrow": "Readiness → Output → Publish",
   "author.publish.title": "Publish Protocol",
   "author.publish.intro":

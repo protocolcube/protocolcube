@@ -1,6 +1,20 @@
 import canonicalize from "canonicalize";
 import Decimal from "decimal.js";
 import { z } from "zod";
+import {
+  DURATION_UNIT_SYMBOLS,
+  DURATION_UNITS,
+  durationEntryToSeconds,
+  durationSecondsToUnit,
+  durationSymbol,
+  durationUnitSecondsRatio,
+  formatDurationValue,
+  isDurationUnit,
+  type DurationUnit,
+} from "./duration";
+
+export { DURATION_UNIT_SYMBOLS, DURATION_UNITS, isDurationUnit };
+export type { DurationUnit };
 
 const ProtocolDecimal = Decimal.clone({
   precision: 120,
@@ -68,6 +82,21 @@ const inputVariableSchema = z.discriminatedUnion("valueType", [
       kind: z.literal("input"),
       id: variableId,
       label: z.string().min(1),
+      valueType: z.literal("duration"),
+      // The frozen Duration Unit enumeration is enforced as the distinct
+      // `invalid_duration_unit` diagnostic during inspection so a bad unit
+      // never blends into a generic schema message.
+      unit: z.string(),
+      defaultValue: decimalString.optional(),
+      minimum: decimalString.optional(),
+      maximum: decimalString.optional(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("input"),
+      id: variableId,
+      label: z.string().min(1),
       valueType: z.literal("boolean"),
       defaultValue: z.boolean().optional(),
     })
@@ -84,17 +113,35 @@ const inputVariableSchema = z.discriminatedUnion("valueType", [
     .strict(),
 ]);
 
-const derivedVariableSchema = z
-  .object({
-    kind: z.literal("derived"),
-    id: variableId,
-    label: z.string().min(1),
-    valueType: z.literal("numeric"),
-    formula: z.string(),
-    precision: z.number().int().min(0).max(100),
-    roundingMode: z.literal("half-even"),
-  })
-  .strict();
+const derivedVariableSchema = z.discriminatedUnion("valueType", [
+  z
+    .object({
+      kind: z.literal("derived"),
+      id: variableId,
+      label: z.string().min(1),
+      valueType: z.literal("numeric"),
+      formula: z.string(),
+      precision: z.number().int().min(0).max(100),
+      roundingMode: z.literal("half-even"),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("derived"),
+      id: variableId,
+      label: z.string().min(1),
+      valueType: z.literal("duration"),
+      // Like the duration input kind, the unit is a plain string at the
+      // schema level so a frozen-enum violation surfaces as the distinct
+      // `invalid_duration_unit` diagnostic during inspection instead of a
+      // generic schema issue.
+      unit: z.string(),
+      formula: z.string(),
+      precision: z.number().int().min(0).max(100),
+      roundingMode: z.literal("half-even"),
+    })
+    .strict(),
+]);
 
 const variableDefinitionSchema = z.union([
   inputVariableSchema,
@@ -216,6 +263,20 @@ export type ProtocolEvaluationResult =
   | { ok: true; values: Record<string, VariableValue> }
   | { ok: false; errors: ProtocolError[] };
 
+/**
+ * Which Variable Value space a resolution validates:
+ * - "entered": Reader/Author entries (numeric accepts any finite decimal;
+ *   duration entries are expressed in the declared Duration Unit).
+ * - "reader-configuration": Reader configuration entries (numeric entries
+ *   must already be canonical; duration entries stay declared-unit).
+ * - "playback-session": Variable Values restored from a Playback Session
+ *   (every value must already be in its resolved canonical form).
+ */
+export type VariableValueResolutionContext =
+  | "entered"
+  | "reader-configuration"
+  | "playback-session";
+
 export type VariableDependencyFormulaDiagnosticCode =
   | "formula_too_long"
   | "invalid_number"
@@ -223,8 +284,25 @@ export type VariableDependencyFormulaDiagnosticCode =
   | "invalid_formula"
   | "formula_error";
 
+/**
+ * Static dimension violations (ADR 0014). Each illegal operator/type
+ * combination carries its own code so Authoring feedback names the exact
+ * mistake; the same codes are thrown at evaluation time as defense in depth.
+ */
+export type VariableDependencyDimensionDiagnosticCode =
+  | "duration_plus_numeric"
+  | "numeric_plus_duration"
+  | "duration_minus_numeric"
+  | "numeric_minus_duration"
+  | "duration_times_duration"
+  | "numeric_divided_by_duration"
+  | "mixed_min_max_arguments"
+  | "duration_result_in_numeric_formula"
+  | "numeric_result_in_duration_formula";
+
 export type VariableDependencyGraphDiagnosticCode =
   | VariableDependencyFormulaDiagnosticCode
+  | VariableDependencyDimensionDiagnosticCode
   | "unknown_variable"
   | "non_numeric_variable"
   | "cyclic_dependency";
@@ -295,6 +373,19 @@ export interface VariableDependencyNonNumericReferenceDiagnostic {
   readonly edgeIds: readonly [string];
 }
 
+export interface VariableDependencyDimensionDiagnostic {
+  readonly kind: "dimension-mismatch";
+  readonly code: VariableDependencyDimensionDiagnosticCode;
+  readonly path: string;
+  readonly message: string;
+  readonly variableId: string;
+  readonly variableIndex: number;
+  /** Variable IDs referenced by the offending operands, in formula order. */
+  readonly referencedVariableIds: readonly string[];
+  readonly nodeIds: readonly string[];
+  readonly edgeIds: readonly string[];
+}
+
 export interface VariableDependencyCycleDiagnostic {
   readonly kind: "cycle";
   readonly code: "cyclic_dependency";
@@ -309,6 +400,7 @@ export type VariableDependencyGraphDiagnostic =
   | VariableDependencyFormulaDiagnostic
   | VariableDependencyUnknownReferenceDiagnostic
   | VariableDependencyNonNumericReferenceDiagnostic
+  | VariableDependencyDimensionDiagnostic
   | VariableDependencyCycleDiagnostic;
 
 export interface VariableDependencyGraphInspection {
@@ -509,58 +601,262 @@ class FormulaParser {
   }
 }
 
+/**
+ * Static dimension of a formula value (ADR 0014): formulas are unit-free, so
+ * a value is either a plain number or a duration expressed in whatever
+ * declared Duration Unit the surrounding evaluation is using.
+ */
+export type FormulaDimension = "numeric" | "duration";
+
+const dimensionFailureMessages: Record<
+  VariableDependencyDimensionDiagnosticCode,
+  string
+> = {
+  duration_plus_numeric: "A formula cannot add a number to a Duration",
+  numeric_plus_duration: "A formula cannot add a Duration to a number",
+  duration_minus_numeric: "A formula cannot subtract a number from a Duration",
+  numeric_minus_duration: "A formula cannot subtract a Duration from a number",
+  duration_times_duration: "A formula cannot multiply two Durations",
+  numeric_divided_by_duration:
+    "A formula cannot divide a number by a Duration",
+  mixed_min_max_arguments:
+    "min and max arguments must all be numbers or all be Durations",
+  duration_result_in_numeric_formula:
+    "A numeric Derived Variable formula must produce a number, not a Duration",
+  numeric_result_in_duration_formula:
+    "A Duration Derived Variable formula must produce a Duration, not a number",
+};
+
+type DimensionOperationResult =
+  | { ok: true; dimension: FormulaDimension }
+  | { ok: false; code: VariableDependencyDimensionDiagnosticCode };
+
+/**
+ * The operator matrix from ADR 0014. One authority for the static pass and
+ * the evaluator: duration ± duration and duration ÷ duration ÷ numeric-style
+ * combinations are legal, everything else is rejected with a distinct code.
+ */
+function inferBinaryDimension(
+  operator: "+" | "-" | "*" | "/",
+  left: FormulaDimension,
+  right: FormulaDimension,
+): DimensionOperationResult {
+  // Addition and subtraction share one matrix: like dimensions combine into
+  // themselves and every mixed pair is rejected with the per-operator code.
+  if (operator === "+" || operator === "-") {
+    if (left === right) {
+      return { ok: true, dimension: left };
+    }
+    return left === "numeric"
+      ? {
+          ok: false,
+          code:
+            operator === "+"
+              ? "numeric_plus_duration"
+              : "numeric_minus_duration",
+        }
+      : {
+          ok: false,
+          code:
+            operator === "+"
+              ? "duration_plus_numeric"
+              : "duration_minus_numeric",
+        };
+  }
+  if (operator === "*") {
+    if (left === "numeric" && right === "numeric") {
+      return { ok: true, dimension: "numeric" };
+    }
+    if (left !== right) {
+      return { ok: true, dimension: "duration" };
+    }
+    return { ok: false, code: "duration_times_duration" };
+  }
+  if (left === "numeric" && right === "numeric") {
+    return { ok: true, dimension: "numeric" };
+  }
+  if (left === "duration" && right === "numeric") {
+    return { ok: true, dimension: "duration" };
+  }
+  if (left === "duration" && right === "duration") {
+    return { ok: true, dimension: "numeric" };
+  }
+  return { ok: false, code: "numeric_divided_by_duration" };
+}
+
+interface FormulaDimensionViolation {
+  code: VariableDependencyDimensionDiagnosticCode;
+  referencedVariableIds: string[];
+}
+
+function distinctIds(ids: Iterable<string>): string[] {
+  return [...new Set(ids)];
+}
+
+/**
+ * Static pass over the parsed AST. Reports one violation per offending site
+ * and returns the expression's dimension. Unknown and non-numeric references
+ * keep their dedicated diagnostics, so they resolve as a numeric placeholder
+ * here instead of cascading extra dimension errors.
+ */
+function inferFormulaDimensions(
+  expression: FormulaExpression,
+  resolveType: (id: string) => FormulaDimension,
+  violations: FormulaDimensionViolation[],
+): FormulaDimension {
+  if (expression.kind === "number") return "numeric";
+  if (expression.kind === "variable") return resolveType(expression.id);
+  if (expression.kind === "unary") {
+    return inferFormulaDimensions(
+      expression.operand,
+      resolveType,
+      violations,
+    );
+  }
+  if (expression.kind === "binary") {
+    const left = inferFormulaDimensions(expression.left, resolveType, violations);
+    const right = inferFormulaDimensions(
+      expression.right,
+      resolveType,
+      violations,
+    );
+    const combined = inferBinaryDimension(expression.operator, left, right);
+    if (!combined.ok) {
+      violations.push({
+        code: combined.code,
+        referencedVariableIds: distinctIds([
+          ...collectVariableReferences(expression.left),
+          ...collectVariableReferences(expression.right),
+        ]),
+      });
+      return "numeric";
+    }
+    return combined.dimension;
+  }
+
+  const argumentDimensions = expression.arguments.map((argument) =>
+    inferFormulaDimensions(argument, resolveType, violations),
+  );
+  if (expression.name === "min" || expression.name === "max") {
+    if (
+      argumentDimensions.length > 0 &&
+      argumentDimensions.some((dimension) => dimension !== argumentDimensions[0])
+    ) {
+      violations.push({
+        code: "mixed_min_max_arguments",
+        referencedVariableIds: distinctIds(
+          expression.arguments.flatMap((argument) => [
+            ...collectVariableReferences(argument),
+          ]),
+        ),
+      });
+      return "numeric";
+    }
+    return argumentDimensions[0] ?? "numeric";
+  }
+  // ceil, floor, and round preserve their first operand's dimension; a call
+  // the evaluator will reject as invalid still resolves to a placeholder.
+  return argumentDimensions[0] ?? "numeric";
+}
+
 function evaluateExpression(
   expression: FormulaExpression,
-  resolveVariable: (id: string) => Decimal,
-): Decimal {
+  resolveVariable: (id: string) => { value: Decimal; dimension: FormulaDimension },
+): { value: Decimal; dimension: FormulaDimension } {
   if (expression.kind === "number") {
-    return new ProtocolDecimal(expression.value);
+    return { value: new ProtocolDecimal(expression.value), dimension: "numeric" };
   }
   if (expression.kind === "variable") {
     return resolveVariable(expression.id);
   }
   if (expression.kind === "unary") {
-    const value = evaluateExpression(expression.operand, resolveVariable);
-    return expression.operator === "-" ? value.negated() : value;
+    const operand = evaluateExpression(expression.operand, resolveVariable);
+    return {
+      value:
+        expression.operator === "-" ? operand.value.negated() : operand.value,
+      dimension: operand.dimension,
+    };
   }
   if (expression.kind === "binary") {
     const left = evaluateExpression(expression.left, resolveVariable);
     const right = evaluateExpression(expression.right, resolveVariable);
-    if (expression.operator === "+") return left.plus(right);
-    if (expression.operator === "-") return left.minus(right);
-    if (expression.operator === "*") return left.times(right);
-    if (right.isZero()) {
-      throw new FormulaFailure("division_by_zero", "Division by zero");
+    const combined = inferBinaryDimension(
+      expression.operator,
+      left.dimension,
+      right.dimension,
+    );
+    if (!combined.ok) {
+      throw new FormulaFailure(
+        combined.code,
+        dimensionFailureMessages[combined.code],
+      );
     }
-    return left.dividedBy(right);
+    let value: Decimal;
+    if (expression.operator === "+") value = left.value.plus(right.value);
+    else if (expression.operator === "-") value = left.value.minus(right.value);
+    else if (expression.operator === "*") value = left.value.times(right.value);
+    else {
+      if (right.value.isZero()) {
+        throw new FormulaFailure("division_by_zero", "Division by zero");
+      }
+      value = left.value.dividedBy(right.value);
+    }
+    return { value, dimension: combined.dimension };
   }
 
-  const values = expression.arguments.map((argument) =>
+  const argumentValues = expression.arguments.map((argument) =>
     evaluateExpression(argument, resolveVariable),
   );
-  if ((expression.name === "min" || expression.name === "max") && values.length > 0) {
-    return expression.name === "min"
-      ? ProtocolDecimal.min(...values)
-      : ProtocolDecimal.max(...values);
+  if (
+    (expression.name === "min" || expression.name === "max") &&
+    argumentValues.length > 0
+  ) {
+    if (
+      argumentValues.some(
+        (argument) => argument.dimension !== argumentValues[0]!.dimension,
+      )
+    ) {
+      throw new FormulaFailure(
+        "mixed_min_max_arguments",
+        dimensionFailureMessages.mixed_min_max_arguments,
+      );
+    }
+    const values = argumentValues.map((argument) => argument.value);
+    return {
+      value:
+        expression.name === "min"
+          ? ProtocolDecimal.min(...values)
+          : ProtocolDecimal.max(...values),
+      dimension: argumentValues[0]!.dimension,
+    };
   }
   if (
     (expression.name === "ceil" || expression.name === "floor") &&
-    values.length === 1
+    argumentValues.length === 1
   ) {
-    return values[0]!.toDecimalPlaces(
-      0,
-      expression.name === "ceil" ? Decimal.ROUND_CEIL : Decimal.ROUND_FLOOR,
-    );
+    return {
+      value: argumentValues[0]!.value.toDecimalPlaces(
+        0,
+        expression.name === "ceil" ? Decimal.ROUND_CEIL : Decimal.ROUND_FLOOR,
+      ),
+      dimension: argumentValues[0]!.dimension,
+    };
   }
   if (
     expression.name === "round" &&
-    (values.length === 1 || values.length === 2)
+    (argumentValues.length === 1 || argumentValues.length === 2)
   ) {
-    const precision = values[1]?.toNumber() ?? 0;
+    const precision = argumentValues[1]?.value.toNumber() ?? 0;
     if (!Number.isInteger(precision) || precision < 0 || precision > 100) {
       throw new FormulaFailure("invalid_function", "Invalid round precision");
     }
-    return values[0]!.toDecimalPlaces(precision, Decimal.ROUND_HALF_EVEN);
+    return {
+      value: argumentValues[0]!.value.toDecimalPlaces(
+        precision,
+        Decimal.ROUND_HALF_EVEN,
+      ),
+      dimension: argumentValues[0]!.dimension,
+    };
   }
   throw new FormulaFailure(
     "invalid_function",
@@ -637,14 +933,16 @@ function inspectVariableDependencyGraph(
     protocol.variables.map((definition) => [definition.id, definition]),
   );
   const edges: EdgeRecord[] = [];
+  const edgesById = new Map<string, EdgeRecord>();
   const diagnostics: VariableDependencyGraphDiagnostic[] = [];
 
   for (const [variableIndex, definition] of protocol.variables.entries()) {
     if (definition.kind !== "derived") continue;
     const targetNode = nodesById.get(definition.id)!;
+    let expression: FormulaExpression;
     let references: string[];
     try {
-      const expression = new FormulaParser(
+      expression = new FormulaParser(
         tokenizeFormula(definition.formula),
       ).parse();
       references = [...collectVariableReferences(expression)];
@@ -693,6 +991,7 @@ function inspectVariableDependencyGraph(
         cycleMember: false,
       };
       edges.push(edge);
+      edgesById.set(edge.id, edge);
 
       if (referenced === undefined) {
         edge.diagnosticCodes.add("unknown_variable");
@@ -710,7 +1009,10 @@ function inspectVariableDependencyGraph(
         });
       } else if (
         referenced.kind === "input" &&
-        referenced.valueType !== "numeric"
+        // Text, boolean, and enum inputs have no formula dimension; Duration
+        // inputs are legal operands with the "duration" dimension.
+        referenced.valueType !== "numeric" &&
+        referenced.valueType !== "duration"
       ) {
         sourceNode.diagnosticCodes.add("non_numeric_variable");
         targetNode.diagnosticCodes.add("non_numeric_variable");
@@ -727,6 +1029,73 @@ function inspectVariableDependencyGraph(
           edgeIds: [edge.id],
         });
       }
+    }
+
+    // Static dimension check (ADR 0014): runs over the parsed AST before any
+    // evaluation so illegal operator/type combinations surface at Authoring
+    // time with a distinct diagnostic.
+    const targetDimension: FormulaDimension =
+      definition.valueType === "duration" ? "duration" : "numeric";
+    const resolveDimensionType = (id: string): FormulaDimension => {
+      const referenced = definitionsById.get(id);
+      // Unknown references keep their own placeholder diagnostic; non-numeric
+      // inputs keep the dedicated non-numeric-reference diagnostic. Both
+      // resolve as numeric here so they do not cascade dimension errors.
+      if (referenced?.kind === "input" && referenced.valueType === "duration") {
+        return "duration";
+      }
+      return "numeric";
+    };
+    const dimensionViolations: FormulaDimensionViolation[] = [];
+    const formulaDimension = inferFormulaDimensions(
+      expression,
+      resolveDimensionType,
+      dimensionViolations,
+    );
+    // The result-type rule only fires when the operands themselves type-check:
+    // an operator violation already explains why the result dimension is
+    // unknown, so it is not cascaded a second diagnostic.
+    if (
+      formulaDimension !== targetDimension &&
+      dimensionViolations.length === 0
+    ) {
+      dimensionViolations.push({
+        code:
+          targetDimension === "duration"
+            ? "numeric_result_in_duration_formula"
+            : "duration_result_in_numeric_formula",
+        referencedVariableIds: distinctIds(references),
+      });
+    }
+    const emittedViolations = new Set<string>();
+    for (const violation of dimensionViolations) {
+      const key = `${violation.code}|${violation.referencedVariableIds.join(">")}`;
+      if (emittedViolations.has(key)) continue;
+      emittedViolations.add(key);
+      const nodeIds = distinctIds([
+        ...violation.referencedVariableIds,
+        definition.id,
+      ]);
+      const edgeIds = distinctIds(
+        violation.referencedVariableIds.map(
+          (referencedId) => `${referencedId}->${definition.id}`,
+        ),
+      );
+      targetNode.diagnosticCodes.add(violation.code);
+      for (const edgeId of edgeIds) {
+        edgesById.get(edgeId)?.diagnosticCodes.add(violation.code);
+      }
+      diagnostics.push({
+        kind: "dimension-mismatch",
+        code: violation.code,
+        path: `variables.${variableIndex}.formula`,
+        message: dimensionFailureMessages[violation.code],
+        variableId: definition.id,
+        variableIndex,
+        referencedVariableIds: violation.referencedVariableIds,
+        nodeIds,
+        edgeIds,
+      });
     }
   }
 
@@ -898,6 +1267,339 @@ function canonicalDecimal(value: Decimal): string {
   }
   const normalized = value.isZero() ? new ProtocolDecimal(0) : value;
   return normalized.toFixed();
+}
+
+/**
+ * Single authority for Variable Value resolution. `evaluateProtocol` resolves
+ * "entered" values; the Reader reuses the same engine for configuration
+ * entries ("reader-configuration") and for Variable Values carried by a
+ * Playback Session ("playback-session") so validation is never
+ * re-implemented locally.
+ *
+ * - "entered": numeric entries accept any finite decimal and are persisted
+ *   canonically; duration entries are expressed in the declared Duration
+ *   Unit; missing Input Variables fall back to their defaults (defaults are
+ *   already canonical seconds for the duration kind).
+ * - "reader-configuration": numeric entries must already be canonical;
+ *   duration entries stay declared-unit; empty text values count as missing.
+ * - "playback-session": every provided value must already be in its resolved
+ *   canonical form (duration values are canonical seconds, never
+ *   re-interpreted as declared-unit entries) and must match the Protocol's
+ *   full resolution exactly.
+ */
+function resolveVariableValues(
+  protocol: Protocol,
+  inputValues: Record<string, VariableValue>,
+  context: VariableValueResolutionContext,
+): ProtocolEvaluationResult {
+  const strict = context !== "entered";
+  const errors: ProtocolError[] = [];
+  const definitions = new Map<string, VariableDefinition>();
+  for (const [index, definition] of protocol.variables.entries()) {
+    if (definitions.has(definition.id)) {
+      errors.push({
+        code: "duplicate_variable",
+        path: `variables.${index}.id`,
+        message: `Duplicate Variable Definition: ${definition.id}`,
+      });
+    } else {
+      definitions.set(definition.id, definition);
+    }
+  }
+
+  if (context === "entered") {
+    for (const id of Object.keys(inputValues)) {
+      const definition = definitions.get(id);
+      if (definition?.kind !== "input") {
+        errors.push({
+          code: "unknown_input",
+          path: `inputValues.${id}`,
+          message: `Unknown Input Variable: ${id}`,
+        });
+      }
+    }
+  }
+
+  const values: Record<string, VariableValue> = {};
+  const numericValues = new Map<string, Decimal>();
+  // Resolved Duration Values in canonical seconds (duration inputs and
+  // Duration Derived Variables), kept separate so formula operands resolve
+  // with their static dimension.
+  const durationValues = new Map<string, Decimal>();
+  for (const [index, definition] of protocol.variables.entries()) {
+    if (definition.kind !== "input") continue;
+    const missingPath =
+      context === "entered" ? `variables.${index}` : `values.${definition.id}`;
+    const invalidPath =
+      context === "entered" ? `inputValues.${definition.id}` : `values.${definition.id}`;
+    const entered = inputValues[definition.id];
+    // Definition defaults are stored in their resolved canonical form
+    // (canonical seconds for the duration kind), so they skip entry
+    // conversion; Reader entries always arrive in entry space.
+    const fromDefault = entered === undefined && definition.defaultValue !== undefined;
+    const supplied = entered ?? definition.defaultValue;
+    if (supplied === undefined) {
+      errors.push({
+        code: "missing_input",
+        path: missingPath,
+        message: `Missing Input Variable: ${definition.id}`,
+      });
+      continue;
+    }
+
+    if (definition.valueType === "boolean") {
+      if (typeof supplied !== "boolean") {
+        errors.push({
+          code: "invalid_input",
+          path: invalidPath,
+          message: `${definition.id} must be boolean`,
+        });
+      } else {
+        values[definition.id] = supplied;
+      }
+      continue;
+    }
+    if (typeof supplied !== "string") {
+      errors.push({
+        code: "invalid_input",
+        path: invalidPath,
+        message: `${definition.id} must be a string`,
+      });
+      continue;
+    }
+    if (definition.valueType === "enum" && !definition.options.includes(supplied)) {
+      errors.push({
+        code: "invalid_input",
+        path: invalidPath,
+        message: `${definition.id} must be one of its declared options`,
+      });
+      continue;
+    }
+    if (definition.valueType === "text" || definition.valueType === "enum") {
+      if (definition.valueType === "text" && context === "reader-configuration" && supplied === "") {
+        errors.push({
+          code: "missing_input",
+          path: missingPath,
+          message: `Missing Input Variable: ${definition.id}`,
+        });
+        continue;
+      }
+      values[definition.id] = supplied;
+      continue;
+    }
+    if (definition.valueType === "duration") {
+      if (!isDurationUnit(definition.unit)) {
+        errors.push({
+          code: "invalid_duration_unit",
+          path: invalidPath,
+          message:
+            "Duration Variable unit must be second, minute, hour, or day",
+        });
+        continue;
+      }
+      try {
+        const seconds =
+          fromDefault || context === "playback-session"
+            ? supplied
+            : durationEntryToSeconds(supplied, definition.unit);
+        const secondsDecimal = new ProtocolDecimal(seconds);
+        if (!secondsDecimal.isFinite() || secondsDecimal.isNegative()) {
+          throw new Error("Invalid duration Variable Value");
+        }
+        if (
+          definition.minimum !== undefined &&
+          secondsDecimal.lessThan(definition.minimum)
+        ) {
+          throw new Error("Below minimum");
+        }
+        if (
+          definition.maximum !== undefined &&
+          secondsDecimal.greaterThan(definition.maximum)
+        ) {
+          throw new Error("Above maximum");
+        }
+        values[definition.id] = canonicalDecimal(secondsDecimal);
+        durationValues.set(definition.id, secondsDecimal);
+      } catch {
+        errors.push({
+          code: "invalid_input",
+          path: invalidPath,
+          message: `${definition.id} must be a non-negative decimal within its constraints`,
+        });
+      }
+      continue;
+    }
+    if (definition.valueType === "numeric") {
+      try {
+        const numeric = new ProtocolDecimal(supplied);
+        if (!numeric.isFinite()) throw new Error("Non-finite");
+        if (strict) {
+          const canonical = numeric.isZero() ? "0" : numeric.toFixed();
+          if (canonical !== supplied) throw new Error("Non-canonical entry");
+        }
+        if (
+          definition.minimum !== undefined &&
+          numeric.lessThan(definition.minimum)
+        ) {
+          throw new Error("Below minimum");
+        }
+        if (
+          definition.maximum !== undefined &&
+          numeric.greaterThan(definition.maximum)
+        ) {
+          throw new Error("Above maximum");
+        }
+        const normalized = canonicalDecimal(numeric);
+        values[definition.id] = normalized;
+        numericValues.set(definition.id, numeric);
+      } catch {
+        errors.push({
+          code: "invalid_input",
+          path: invalidPath,
+          message: strict
+            ? `${definition.id} must be a canonical decimal within its constraints`
+            : `${definition.id} must be a finite decimal within its constraints`,
+        });
+      }
+    }
+  }
+
+  const visiting = new Set<string>();
+  const evaluateDerived = (id: string): {
+    value: Decimal;
+    dimension: FormulaDimension;
+  } => {
+    const existingNumeric = numericValues.get(id);
+    if (existingNumeric !== undefined) {
+      return { value: existingNumeric, dimension: "numeric" };
+    }
+    const existingDuration = durationValues.get(id);
+    if (existingDuration !== undefined) {
+      return { value: existingDuration, dimension: "duration" };
+    }
+    const definition = definitions.get(id);
+    if (definition === undefined) {
+      throw new FormulaFailure("unknown_variable", `Unknown variable: ${id}`);
+    }
+    if (definition.kind !== "derived") {
+      throw new FormulaFailure(
+        "non_numeric_variable",
+        `Variable is not numeric: ${id}`,
+      );
+    }
+    if (visiting.has(id)) {
+      throw new FormulaFailure("cyclic_dependency", `Cyclic dependency: ${id}`);
+    }
+    visiting.add(id);
+    try {
+      const expression = new FormulaParser(
+        tokenizeFormula(definition.formula),
+      ).parse();
+      // Declared-unit rounding authority (ADR 0014): a Duration Derived
+      // Variable's entire formula is evaluated and rounded in its declared
+      // unit. Duration operands arrive as canonical seconds and are converted
+      // into that unit; numeric targets keep duration operands in canonical
+      // seconds (duration ÷ duration cancels the unit either way).
+      const targetIsDuration = definition.valueType === "duration";
+      const targetUnitSeconds = targetIsDuration
+        ? isDurationUnit(definition.unit)
+          ? new ProtocolDecimal(durationUnitSecondsRatio(definition.unit))
+          : undefined
+        : undefined;
+      if (targetIsDuration && targetUnitSeconds === undefined) {
+        throw new FormulaFailure(
+          "invalid_duration_unit",
+          "Duration Variable unit must be second, minute, hour, or day",
+        );
+      }
+      const result = evaluateExpression(expression, (operandId) => {
+        const operand = evaluateDerived(operandId);
+        if (operand.dimension === "duration" && targetUnitSeconds !== undefined) {
+          return {
+            value: operand.value.dividedBy(targetUnitSeconds),
+            dimension: "duration",
+          };
+        }
+        return operand;
+      });
+      // Defense in depth: the static pass rejects these earlier at Authoring
+      // time; evaluation refuses them with the same distinct codes.
+      if (targetIsDuration && result.dimension !== "duration") {
+        throw new FormulaFailure(
+          "numeric_result_in_duration_formula",
+          dimensionFailureMessages.numeric_result_in_duration_formula,
+        );
+      }
+      if (!targetIsDuration && result.dimension !== "numeric") {
+        throw new FormulaFailure(
+          "duration_result_in_numeric_formula",
+          dimensionFailureMessages.duration_result_in_numeric_formula,
+        );
+      }
+      const rounded = result.value.toDecimalPlaces(
+        definition.precision,
+        Decimal.ROUND_HALF_EVEN,
+      );
+      if (targetIsDuration && targetUnitSeconds !== undefined) {
+        // Intermediate results may be negative; a negative final duration is
+        // not storable.
+        if (rounded.isNegative()) {
+          throw new FormulaFailure(
+            "negative_duration",
+            "A Duration Derived Variable result may not be negative",
+          );
+        }
+        const seconds = rounded.times(targetUnitSeconds);
+        durationValues.set(id, seconds);
+        values[id] = canonicalDecimal(seconds);
+        return { value: rounded, dimension: "duration" };
+      }
+      numericValues.set(id, rounded);
+      values[id] = canonicalDecimal(rounded);
+      return { value: rounded, dimension: "numeric" };
+    } finally {
+      visiting.delete(id);
+    }
+  };
+
+  if (errors.length === 0) {
+    for (const [index, definition] of protocol.variables.entries()) {
+      if (definition.kind !== "derived") continue;
+      try {
+        evaluateDerived(definition.id);
+      } catch (error) {
+        const failure =
+          error instanceof FormulaFailure
+            ? error
+            : new FormulaFailure("formula_error", "Formula evaluation failed");
+        errors.push({
+          code: failure.code,
+          path: `variables.${index}.formula`,
+          message: failure.message,
+        });
+      }
+    }
+  }
+
+  if (
+    context === "playback-session" &&
+    errors.length === 0 &&
+    (Object.keys(inputValues).length !== Object.keys(values).length ||
+      !Object.entries(values).every(
+        ([id, value]) => inputValues[id] === value,
+      ))
+  ) {
+    errors.push({
+      code: "invalid_input",
+      path: "values",
+      message:
+        "Playback Session Variable Values do not match this Protocol's Variables",
+    });
+  }
+
+  return errors.length === 0
+    ? { ok: true, values }
+    : { ok: false, errors };
 }
 
 function bytesToBase64url(bytes: Uint8Array): string {
@@ -1127,8 +1829,36 @@ function countTaskItems(markdown: string): number {
   return count;
 }
 
+/**
+ * A Variable Definition a derived Section duration may reference: any
+ * Derived Variable, plus Numeric Input Variables (legacy value-means-seconds
+ * semantics) and Duration Input Variables (canonical seconds). This
+ * predicate is the single authority shared by the `invalid_duration_variable`
+ * inspection check and the Author's Section duration picker; whether the
+ * referenced id exists at all remains an inspection concern.
+ */
+function isSectionDurationCandidate(definition: VariableDefinition): boolean {
+  return (
+    definition.kind === "derived" ||
+    (definition.kind === "input" &&
+      (definition.valueType === "numeric" ||
+        definition.valueType === "duration"))
+  );
+}
+
 export const ProtocolCore = {
   countTaskItems,
+
+  /**
+   * Whether a derived Section duration may reference this Variable
+   * Definition: any Derived Variable, or a Numeric or Duration Input
+   * Variable. The same predicate drives the `invalid_duration_variable`
+   * inspection check, so an id the picker lists can never fail inspection
+   * on kind.
+   */
+  isSectionDurationCandidate(definition: VariableDefinition): boolean {
+    return isSectionDurationCandidate(definition);
+  },
 
   inspectVariableDependencyGraph(
     protocol: Protocol,
@@ -1317,6 +2047,59 @@ export const ProtocolCore = {
           });
         }
       }
+      if (definition.kind === "input" && definition.valueType === "duration") {
+        if (!isDurationUnit(definition.unit)) {
+          semanticErrors.push({
+            code: "invalid_duration_unit",
+            path: `variables.${index}.unit`,
+            message: "Duration Variable unit must be second, minute, hour, or day",
+          });
+        }
+        const minimum =
+          definition.minimum === undefined
+            ? undefined
+            : new ProtocolDecimal(definition.minimum);
+        const maximum =
+          definition.maximum === undefined
+            ? undefined
+            : new ProtocolDecimal(definition.maximum);
+        if (
+          minimum !== undefined &&
+          maximum !== undefined &&
+          minimum.greaterThan(maximum)
+        ) {
+          semanticErrors.push({
+            code: "invalid_variable_constraints",
+            path: `variables.${index}`,
+            message: "Duration minimum may not exceed maximum",
+          });
+        }
+        if (
+          definition.defaultValue !== undefined &&
+          ((minimum !== undefined &&
+            new ProtocolDecimal(definition.defaultValue).lessThan(minimum)) ||
+            (maximum !== undefined &&
+              new ProtocolDecimal(definition.defaultValue).greaterThan(
+                maximum,
+              )))
+        ) {
+          semanticErrors.push({
+            code: "invalid_variable_default",
+            path: `variables.${index}.defaultValue`,
+            message: "Duration default must satisfy its constraints",
+          });
+        }
+      }
+      if (definition.kind === "derived" && definition.valueType === "duration") {
+        if (!isDurationUnit(definition.unit)) {
+          semanticErrors.push({
+            code: "invalid_duration_unit",
+            path: `variables.${index}.unit`,
+            message:
+              "Duration Variable unit must be second, minute, hour, or day",
+          });
+        }
+      }
     }
     const sectionIds = new Set<string>();
     for (const [index, section] of result.data.sections.entries()) {
@@ -1359,14 +2142,21 @@ export const ProtocolCore = {
       }
       if (section.duration.kind === "derived") {
         const definition = definitionsById.get(section.duration.variableId);
+        // A derived Section duration takes its canonical-seconds value
+        // directly from a Duration Input Variable, keeps the legacy
+        // value-means-seconds semantics for Numeric Input Variables, and may
+        // reference any Derived Variable. Every other kind (and an unknown
+        // id) is rejected; admissibility by kind is the shared
+        // `isSectionDurationCandidate` predicate.
         if (
           definition === undefined ||
-          (definition.kind === "input" && definition.valueType !== "numeric")
+          !isSectionDurationCandidate(definition)
         ) {
           semanticErrors.push({
             code: "invalid_duration_variable",
             path: `sections.${index}.duration.variableId`,
-            message: "A Section duration must reference a Numeric Variable",
+            message:
+              "A Section duration must reference a Numeric or Duration Variable",
           });
         }
       }
@@ -1434,21 +2224,29 @@ export const ProtocolCore = {
         testCase.expectedDerivedValues,
       )) {
         const actual = evaluation.values[id];
-        const roundedActual =
-          typeof actual === "string"
-            ? canonicalDecimal(
-                new ProtocolDecimal(actual).toDecimalPlaces(
-                  testCase.precision,
-                  Decimal.ROUND_HALF_EVEN,
-                ),
+        // Declared-unit rounding authority: expectations for Duration Derived
+        // Variables are stored as canonical seconds and both sides are
+        // rounded in the variable's declared Duration Unit, mirroring how the
+        // formula itself is evaluated and rounded.
+        const expectedDefinition = definitionsById.get(id);
+        const durationUnitSeconds =
+          expectedDefinition?.kind === "derived" &&
+          expectedDefinition.valueType === "duration" &&
+          isDurationUnit(expectedDefinition.unit)
+            ? new ProtocolDecimal(
+                durationUnitSecondsRatio(expectedDefinition.unit),
               )
             : undefined;
-        const roundedExpected = canonicalDecimal(
-          new ProtocolDecimal(expected).toDecimalPlaces(
-            testCase.precision,
-            Decimal.ROUND_HALF_EVEN,
-          ),
-        );
+        const comparisonForm = (value: string): string =>
+          canonicalDecimal(
+            (durationUnitSeconds === undefined
+              ? new ProtocolDecimal(value)
+              : new ProtocolDecimal(value).dividedBy(durationUnitSeconds)
+            ).toDecimalPlaces(testCase.precision, Decimal.ROUND_HALF_EVEN),
+          );
+        const roundedActual =
+          typeof actual === "string" ? comparisonForm(actual) : undefined;
+        const roundedExpected = comparisonForm(expected);
         if (roundedActual !== roundedExpected) {
           semanticErrors.push({
             code: "formula_test_failed",
@@ -1751,159 +2549,60 @@ export const ProtocolCore = {
     protocol: Protocol,
     inputValues: Record<string, VariableValue>,
   ): ProtocolEvaluationResult {
-    const errors: ProtocolError[] = [];
-    const definitions = new Map<string, VariableDefinition>();
-    for (const [index, definition] of protocol.variables.entries()) {
-      if (definitions.has(definition.id)) {
-        errors.push({
-          code: "duplicate_variable",
-          path: `variables.${index}.id`,
-          message: `Duplicate Variable Definition: ${definition.id}`,
-        });
-      } else {
-        definitions.set(definition.id, definition);
-      }
-    }
+    return resolveVariableValues(protocol, inputValues, "entered");
+  },
 
-    for (const id of Object.keys(inputValues)) {
-      const definition = definitions.get(id);
-      if (definition?.kind !== "input") {
-        errors.push({
-          code: "unknown_input",
-          path: `inputValues.${id}`,
-          message: `Unknown Input Variable: ${id}`,
-        });
-      }
-    }
+  /**
+   * Resolves and validates Variable Values through the same engine
+   * `evaluateProtocol` uses. The Reader configuration validates its entries
+   * with "reader-configuration"; Playback Session restore validates stored
+   * Variable Values with "playback-session" (duration values are canonical
+   * seconds and are never re-interpreted as declared-unit entries).
+   */
+  resolveVariableValues(
+    protocol: Protocol,
+    values: Record<string, VariableValue>,
+    context: VariableValueResolutionContext,
+  ): ProtocolEvaluationResult {
+    return resolveVariableValues(protocol, values, context);
+  },
 
-    const values: Record<string, VariableValue> = {};
-    const numericValues = new Map<string, Decimal>();
-    for (const [index, definition] of protocol.variables.entries()) {
-      if (definition.kind !== "input") continue;
-      const supplied = inputValues[definition.id] ?? definition.defaultValue;
-      if (supplied === undefined) {
-        errors.push({
-          code: "missing_input",
-          path: `variables.${index}`,
-          message: `Missing Input Variable: ${definition.id}`,
-        });
-        continue;
-      }
+  /**
+   * Converts an entry expressed in the declared Duration Unit into the
+   * canonical seconds form stored in Protocol definitions and Variable
+   * Values. Throws when the entry is not a finite decimal.
+   */
+  convertDurationEntryToSeconds(entry: string, unit: DurationUnit): string {
+    return durationEntryToSeconds(entry, unit);
+  },
 
-      if (definition.valueType === "boolean") {
-        if (typeof supplied !== "boolean") {
-          errors.push({
-            code: "invalid_input",
-            path: `inputValues.${definition.id}`,
-            message: `${definition.id} must be boolean`,
-          });
-        } else {
-          values[definition.id] = supplied;
-        }
-        continue;
-      }
-      if (typeof supplied !== "string") {
-        errors.push({
-          code: "invalid_input",
-          path: `inputValues.${definition.id}`,
-          message: `${definition.id} must be a string`,
-        });
-        continue;
-      }
-      if (definition.valueType === "enum" && !definition.options.includes(supplied)) {
-        errors.push({
-          code: "invalid_input",
-          path: `inputValues.${definition.id}`,
-          message: `${definition.id} must be one of its declared options`,
-        });
-        continue;
-      }
-      if (definition.valueType === "numeric") {
-        try {
-          const numeric = new ProtocolDecimal(supplied);
-          if (!numeric.isFinite()) throw new Error("Non-finite");
-          if (
-            definition.minimum !== undefined &&
-            numeric.lessThan(definition.minimum)
-          ) {
-            throw new Error("Below minimum");
-          }
-          if (
-            definition.maximum !== undefined &&
-            numeric.greaterThan(definition.maximum)
-          ) {
-            throw new Error("Above maximum");
-          }
-          const normalized = canonicalDecimal(numeric);
-          values[definition.id] = normalized;
-          numericValues.set(definition.id, numeric);
-        } catch {
-          errors.push({
-            code: "invalid_input",
-            path: `inputValues.${definition.id}`,
-            message: `${definition.id} must be a finite decimal within its constraints`,
-          });
-        }
-      } else {
-        values[definition.id] = supplied;
-      }
-    }
+  /**
+   * Converts canonical seconds back into the declared Duration Unit for
+   * presentation. Throws when the seconds value is not a finite decimal.
+   */
+  convertDurationSecondsToUnit(seconds: string, unit: DurationUnit): string {
+    return durationSecondsToUnit(seconds, unit);
+  },
 
-    const visiting = new Set<string>();
-    const evaluateDerived = (id: string): Decimal => {
-      const existing = numericValues.get(id);
-      if (existing !== undefined) return existing;
-      const definition = definitions.get(id);
-      if (definition === undefined) {
-        throw new FormulaFailure("unknown_variable", `Unknown variable: ${id}`);
-      }
-      if (definition.kind !== "derived") {
-        throw new FormulaFailure(
-          "non_numeric_variable",
-          `Variable is not numeric: ${id}`,
-        );
-      }
-      if (visiting.has(id)) {
-        throw new FormulaFailure("cyclic_dependency", `Cyclic dependency: ${id}`);
-      }
-      visiting.add(id);
-      try {
-        const expression = new FormulaParser(
-          tokenizeFormula(definition.formula),
-        ).parse();
-        const result = evaluateExpression(expression, evaluateDerived).toDecimalPlaces(
-          definition.precision,
-          Decimal.ROUND_HALF_EVEN,
-        );
-        numericValues.set(id, result);
-        values[id] = canonicalDecimal(result);
-        return result;
-      } finally {
-        visiting.delete(id);
-      }
-    };
+  /**
+   * The single display formatter for Duration Variable values: renders
+   * canonical seconds as a plain decimal in the declared Duration Unit
+   * with its language-independent symbol, e.g. `1.5 h`. Reader step-text
+   * interpolation, the Author Preview, and the Completion Summary all
+   * render through this formatter, so displayed values always equal the
+   * stored values converted exactly.
+   */
+  formatDurationValue(seconds: string, unit: DurationUnit): string {
+    return formatDurationValue(seconds, unit);
+  },
 
-    if (errors.length === 0) {
-      for (const [index, definition] of protocol.variables.entries()) {
-        if (definition.kind !== "derived") continue;
-        try {
-          evaluateDerived(definition.id);
-        } catch (error) {
-          const failure =
-            error instanceof FormulaFailure
-              ? error
-              : new FormulaFailure("formula_error", "Formula evaluation failed");
-          errors.push({
-            code: failure.code,
-            path: `variables.${index}.formula`,
-            message: failure.message,
-          });
-        }
-      }
-    }
-
-    return errors.length === 0
-      ? { ok: true, values }
-      : { ok: false, errors };
+  /**
+   * The language-independent symbol for a Duration Unit (for example
+   * `min`), or the raw string when the unit is not a valid Duration Unit.
+   * The unit-label counterpart of `formatDurationValue`, so no surface
+   * re-derives a unit symbol locally.
+   */
+  durationSymbol(unit: string): string {
+    return durationSymbol(unit);
   },
 };

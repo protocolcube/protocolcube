@@ -74,6 +74,16 @@ A Variable Definition whose value is calculated from Input Variables or other De
 _Chinese_: 派生变量
 _Avoid_: Formula variable, output variable, calculated field
 
+**Duration Variable**:
+A Variable Definition whose value represents a time span, entered and presented in a Duration Unit and computed in canonical seconds.
+_Chinese_: 时长变量
+_Avoid_: Timer variable, time period, interval
+
+**Duration Unit**:
+A unit of time—second, minute, hour, or day—declared by the Author for entering and presenting a Duration Variable's value.
+_Chinese_: 时长单位
+_Avoid_: Time unit, scale, dimension
+
 **Variable Value**:
 A resolved value for an Input Variable or Derived Variable during a Playback Session.
 _Chinese_: 变量值

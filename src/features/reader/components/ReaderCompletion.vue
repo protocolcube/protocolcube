@@ -9,7 +9,7 @@ const emit = defineEmits<{ exitPreview: []; status: [key: TranslationKey, params
 const readerStore = useReaderStore();
 const { completionSummary, isPreview, protocol, snapshot } = storeToRefs(readerStore);
 const clearSessionRequested = ref(false);
-const summaryVariables = computed(() => completionSummary.value === undefined ? [] : protocol.value?.variables.filter((definition) => completionSummary.value?.values[definition.id] !== undefined).map((definition) => ({ id: definition.id, label: definition.label, value: completionSummary.value?.values[definition.id] })) ?? []);
+const summaryVariables = computed(() => completionSummary.value === undefined ? [] : protocol.value?.variables.filter((definition) => completionSummary.value?.presentedValues[definition.id] !== undefined).map((definition) => ({ id: definition.id, label: definition.label, value: completionSummary.value?.presentedValues[definition.id] })) ?? []);
 const summarySections = computed(() => completionSummary.value === undefined ? [] : protocol.value?.sections.filter((section) => completionSummary.value?.completedSectionIds.includes(section.sectionId)) ?? []);
 function formatUtc(value: number): string { return new Intl.DateTimeFormat(locale.value, { dateStyle: "medium", timeStyle: "medium", timeZone: "UTC" }).format(value); }
 function printSummary(): void { window.print(); }

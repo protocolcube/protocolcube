@@ -6,6 +6,7 @@ import {
   type Protocol,
   type ProtocolError,
   type VariableValue,
+  isDurationUnit,
 } from "../../../domain/protocol";
 
 const ReaderDecimal = Decimal.clone({
@@ -98,7 +99,17 @@ export type ReaderSnapshot =
 export interface CompletionSummary {
   label: "Non-audit personal reference";
   protocolFingerprint: string;
+  /**
+   * Canonical resolved Variable Values, exactly as the resumable Playback
+   * Session stores them: Duration Variables are canonical seconds.
+   */
   values: Record<string, VariableValue>;
+  /**
+   * Presented Variable Values: Duration Variables are rendered in their
+   * declared Duration Unit through the single domain formatter, so `text`
+   * and the completion screen always show the same formatted strings.
+   */
+  presentedValues: Record<string, VariableValue>;
   completedSectionIds: string[];
   startedAtUtc: number;
   completedAtUtc: number;
@@ -168,6 +179,39 @@ function interpolate(
     );
   }
   return result;
+}
+
+/**
+ * Duration Variable Values are stored as canonical seconds, but every
+ * presented value renders through the single domain formatter in the
+ * declared Duration Unit (Reader step text, the Author Preview, and the
+ * Completion Summary). This covers Duration Inputs and Duration Derived
+ * Variables alike: a Derived duration value is canonical seconds exactly
+ * like an Input value. Other Variable Value kinds pass through unchanged,
+ * and the HTML and Markdown escaping inside `interpolate` still applies to
+ * the formatted result. Section-duration table and timer displays are not
+ * presentations of Variable Values and do not go through here.
+ */
+function presentationValues(
+  protocol: Protocol,
+  values: Record<string, VariableValue>,
+): Record<string, VariableValue> {
+  const presented = { ...values };
+  for (const definition of protocol.variables) {
+    const value = values[definition.id];
+    if (
+      (definition.kind === "input" || definition.kind === "derived") &&
+      definition.valueType === "duration" &&
+      typeof value === "string" &&
+      isDurationUnit(definition.unit)
+    ) {
+      presented[definition.id] = ProtocolCore.formatDurationValue(
+        value,
+        definition.unit,
+      );
+    }
+  }
+  return presented;
 }
 
 export class ReaderWorkspace {
@@ -297,7 +341,18 @@ export class ReaderWorkspace {
           definition.kind === "input" &&
           definition.defaultValue !== undefined
         ) {
-          this.values[definition.id] = definition.defaultValue;
+          // Duration defaults are stored as canonical seconds; the
+          // configuration entry space is the declared Duration Unit.
+          // (Playability requires a valid unit; the fallback keeps the raw
+          // default only for protocols that could not be inspected.)
+          this.values[definition.id] =
+            definition.valueType === "duration" &&
+            isDurationUnit(definition.unit)
+              ? ProtocolCore.convertDurationSecondsToUnit(
+                  definition.defaultValue,
+                  definition.unit,
+                )
+              : definition.defaultValue;
         }
       }
       this.evaluateConfiguration();
@@ -574,27 +629,21 @@ export class ReaderWorkspace {
       ) {
         throw new Error("Playback Session does not match this Protocol");
       }
-      const inputValues: Record<string, VariableValue> = {};
-      for (const definition of this.protocol.variables) {
-        if (definition.kind === "input") {
-          const value = parsed.values[definition.id];
-          if (value !== undefined) inputValues[definition.id] = value;
-        }
-      }
-      const evaluation = ProtocolCore.evaluateProtocol(
+      // Stored Variable Values are already in their resolved canonical form
+      // (canonical seconds for the duration kind), so they are validated
+      // against their definitions directly instead of being re-fed as
+      // declared-unit entries.
+      const resolution = ProtocolCore.resolveVariableValues(
         this.protocol,
-        inputValues,
+        parsed.values,
+        "playback-session",
       );
-      if (!evaluation.ok) throw new Error("Playback Session values are invalid");
+      if (!resolution.ok) {
+        throw new Error("Playback Session values are invalid");
+      }
       const currentSection = this.protocol.sections[parsed.currentSectionIndex];
       const completedIds = new Set(parsed.completedSectionIds);
       const checkedTaskItems = parsed.checkedTaskItems ?? {};
-      const valuesMatch =
-        Object.keys(parsed.values).length ===
-          Object.keys(evaluation.values).length &&
-        Object.entries(evaluation.values).every(
-          ([id, value]) => parsed.values[id] === value,
-        );
       const completedStateIsValid =
         parsed.state !== "completed" ||
         (parsed.currentSectionIndex === this.protocol.sections.length &&
@@ -619,7 +668,6 @@ export class ReaderWorkspace {
             checkedTaskItems,
           ));
       if (
-        !valuesMatch ||
         completedIds.size !== parsed.completedSectionIds.length ||
         Object.keys(checkedTaskItems).some(
           (sectionId) =>
@@ -652,7 +700,7 @@ export class ReaderWorkspace {
       ) {
         throw new Error("Playback Session contains an impossible state");
       }
-      this.values = evaluation.values;
+      this.values = resolution.values;
       this.currentSectionIndex = parsed.currentSectionIndex;
       this.completedSectionIds = [...parsed.completedSectionIds];
       this.checkedTaskItems = structuredClone(checkedTaskItems);
@@ -775,8 +823,14 @@ export class ReaderWorkspace {
     }
     const section = this.protocol.sections[this.currentSectionIndex!];
     const renderedSection = {
-      title: interpolate(section!.title, this.values),
-      markdown: interpolate(section!.markdown, this.values),
+      title: interpolate(
+        section!.title,
+        presentationValues(this.protocol, this.values),
+      ),
+      markdown: interpolate(
+        section!.markdown,
+        presentationValues(this.protocol, this.values),
+      ),
     };
     const checkedTaskItemIndexes = [
       ...(this.checkedTaskItems[section!.sectionId] ?? []),
@@ -853,10 +907,17 @@ export class ReaderWorkspace {
         "Complete Playback before creating a Completion Summary",
       );
     }
+    // The Completion Summary is unsigned and non-evidentiary (see
+    // CONTEXT.md): `values` carries the canonical resolved Variable Values
+    // while the presented record formats every Duration Variable through
+    // the single domain formatter, so `text` and the completion screen
+    // show the same formatted strings without losing the canonical form.
+    const presentedValues = presentationValues(this.protocol!, this.values);
     return {
       label: "Non-audit personal reference",
       protocolFingerprint: this.protocolFingerprint,
-      values: structuredClone(this.values),
+      values: { ...this.values },
+      presentedValues,
       completedSectionIds: [...this.completedSectionIds],
       startedAtUtc: this.startedAtUtc,
       completedAtUtc: this.completedAtUtc,
@@ -868,7 +929,7 @@ export class ReaderWorkspace {
         "Variable Values:",
         ...this.protocol!.variables
           .filter((definition) => this.values[definition.id] !== undefined)
-          .map((definition) => `${definition.id}: ${this.values[definition.id]}`),
+          .map((definition) => `${definition.id}: ${presentedValues[definition.id]}`),
         "Completed Sections:",
         ...this.completedSectionIds,
       ].join("\n"),
@@ -876,114 +937,51 @@ export class ReaderWorkspace {
   }
 
   private evaluateConfiguration(): void {
-    const inputErrors: ProtocolError[] = [];
-    for (const definition of this.protocol!.variables) {
-      if (definition.kind !== "input") continue;
-      const value = this.values[definition.id];
-      const path = `values.${definition.id}`;
-      if (value === undefined || (definition.valueType === "text" && value === "")) {
-        inputErrors.push({
-          code: "missing_input",
-          path,
-          message: `Missing Input Variable: ${definition.id}`,
-        });
-        continue;
-      }
-      if (definition.valueType === "boolean") {
-        if (typeof value !== "boolean") {
-          inputErrors.push({
-            code: "invalid_input",
-            path,
-            message: `${definition.id} must be boolean`,
-          });
-        }
-        continue;
-      }
-      if (typeof value !== "string") {
-        inputErrors.push({
-          code: "invalid_input",
-          path,
-          message: `${definition.id} must be a string`,
-        });
-        continue;
-      }
-      if (
-        definition.valueType === "enum" &&
-        !definition.options.includes(value)
-      ) {
-        inputErrors.push({
-          code: "invalid_input",
-          path,
-          message: `${definition.id} must be one of its declared options`,
-        });
-        continue;
-      }
-      if (definition.valueType === "numeric") {
-        try {
-          const numeric = new ReaderDecimal(value);
-          const canonical = numeric.isZero() ? "0" : numeric.toFixed();
-          if (
-            !numeric.isFinite() ||
-            canonical !== value ||
-            (definition.minimum !== undefined &&
-              numeric.lessThan(definition.minimum)) ||
-            (definition.maximum !== undefined &&
-              numeric.greaterThan(definition.maximum))
-          ) {
-            throw new Error("Invalid numeric Input Variable");
-          }
-        } catch {
-          inputErrors.push({
-            code: "invalid_input",
-            path,
-            message: `${definition.id} must be a canonical decimal within its constraints`,
-          });
-        }
-      }
-    }
-    if (inputErrors.length > 0) {
-      this.evaluationErrors = inputErrors;
+    // Variable Value validation and resolution live in the domain seam
+    // (ProtocolCore.resolveVariableValues); the Reader never re-implements
+    // per-kind checks locally.
+    const result = ProtocolCore.resolveVariableValues(
+      this.protocol!,
+      this.values,
+      "reader-configuration",
+    );
+    if (!result.ok) {
+      this.evaluationErrors = result.errors;
       this.mode = "configuring";
       return;
     }
-    const result = ProtocolCore.evaluateProtocol(this.protocol!, this.values);
-    if (result.ok) {
-      const durationErrors: ProtocolError[] = [];
-      for (const [index, section] of this.protocol!.sections.entries()) {
-        if (section.duration.kind !== "derived") continue;
-        const seconds = result.values[section.duration.variableId];
-        const milliseconds =
-          typeof seconds === "string"
-            ? new ReaderDecimal(seconds)
-                .times(1_000)
-                .toDecimalPlaces(0, Decimal.ROUND_HALF_EVEN)
-            : undefined;
-        if (
-          milliseconds === undefined ||
-          milliseconds.lessThan(1_000) ||
-          milliseconds.greaterThan(604_800_000)
-        ) {
-          durationErrors.push({
-            code: "invalid_duration",
-            path: `sections.${index}.duration`,
-            message:
-              "A resolved Section duration must be from 1 second through 7 days",
-          });
-        }
+    const durationErrors: ProtocolError[] = [];
+    for (const [index, section] of this.protocol!.sections.entries()) {
+      if (section.duration.kind !== "derived") continue;
+      const seconds = result.values[section.duration.variableId];
+      const milliseconds =
+        typeof seconds === "string"
+          ? new ReaderDecimal(seconds)
+              .times(1_000)
+              .toDecimalPlaces(0, Decimal.ROUND_HALF_EVEN)
+          : undefined;
+      if (
+        milliseconds === undefined ||
+        milliseconds.lessThan(1_000) ||
+        milliseconds.greaterThan(604_800_000)
+      ) {
+        durationErrors.push({
+          code: "invalid_duration",
+          path: `sections.${index}.duration`,
+          message:
+            "A resolved Section duration must be from 1 second through 7 days",
+        });
       }
-      if (durationErrors.length > 0) {
-        this.values = result.values;
-        this.evaluationErrors = durationErrors;
-        this.mode = "configuring";
-        return;
-      }
-      this.values = result.values;
-      this.evaluationErrors = [];
-      this.mode = "ready";
-    } else {
-      this.evaluationErrors = result.errors;
-      this.mode = "configuring";
     }
+    if (durationErrors.length > 0) {
+      this.values = result.values;
+      this.evaluationErrors = durationErrors;
+      this.mode = "configuring";
+      return;
+    }
+    this.values = result.values;
+    this.evaluationErrors = [];
+    this.mode = "ready";
   }
 
   private enterCurrentSection(): void {

@@ -631,6 +631,68 @@ describe("AuthorWorkspace", () => {
     });
   });
 
+  it("surfaces duration dimension diagnostics while editing", async () => {
+    const keys = await ProtocolCore.generateAuthorKeyPair();
+    const workspace = await AuthorWorkspace.open({
+      databaseName: `author-workspace-${crypto.randomUUID()}`,
+      indexedDB,
+    });
+    const bundle = await workspace.createKeyBundle({
+      privateKeyPkcs8: await ProtocolCore.exportPrivateKeyPkcs8(
+        keys.privateKey,
+      ),
+      publicKeySpki: await ProtocolCore.exportPublicKeySpki(keys.publicKey),
+      passphrase: "duration formula passphrase",
+      iterations: 600_000,
+    });
+    await workspace.unlockKeyBundle(bundle, "duration formula passphrase");
+    await workspace.createDraft(protocol);
+    workspace.replaceVariables([
+      {
+        kind: "input",
+        id: "soakMinutes",
+        label: "Soak duration",
+        valueType: "duration",
+        unit: "minute",
+      },
+      {
+        kind: "input",
+        id: "dilutionRatio",
+        label: "Dilution ratio",
+        valueType: "numeric",
+      },
+      {
+        kind: "derived",
+        id: "totalMinutes",
+        label: "Total duration",
+        valueType: "duration",
+        unit: "minute",
+        formula: "dilutionRatio + soakMinutes",
+        precision: 2,
+        roundingMode: "half-even",
+      },
+    ]);
+    workspace.replaceFormulaTestCases([]);
+
+    const inspection = workspace.inspectDraft();
+    expect(inspection).toMatchObject({
+      format: "valid",
+      playable: false,
+      errors: expect.arrayContaining([
+        expect.objectContaining({
+          code: "numeric_plus_duration",
+          path: "variables.2.formula",
+        }),
+        expect.objectContaining({ code: "missing_formula_test_case" }),
+      ]),
+    });
+    // A Duration Input is a legal formula operand, so the numeric-only
+    // rejection must not appear for referencing soakMinutes.
+    expect(
+      inspection.errors.map((error) => error.code),
+    ).not.toContain("non_numeric_variable");
+  });
+
   it("imports Published Protocol data without executing its HTML wrapper", async () => {
     const keys = await ProtocolCore.generateAuthorKeyPair();
     const workspace = await AuthorWorkspace.open({
