@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  DURATION_UNIT_SYMBOLS,
   ProtocolCore,
   type Envelope,
   type Protocol,
+  type VariableDefinition,
 } from "./index";
 
 const validProtocol: Protocol = {
@@ -620,6 +622,169 @@ describe("ProtocolCore", () => {
     );
   });
 
+  it("accepts Duration and Numeric Input Variables as Section duration references", () => {
+    const durationInputResult = ProtocolCore.inspectProtocol({
+      ...validProtocol,
+      sections: [
+        {
+          ...validProtocol.sections[0],
+          duration: { kind: "derived", variableId: "soak" },
+        },
+      ],
+      variables: [
+        {
+          kind: "input",
+          id: "soak",
+          label: "Soak",
+          valueType: "duration",
+          unit: "minute",
+          minimum: "60",
+          maximum: "3600",
+        },
+      ],
+    });
+    const numericInputResult = ProtocolCore.inspectProtocol({
+      ...validProtocol,
+      sections: [
+        {
+          ...validProtocol.sections[0],
+          duration: { kind: "derived", variableId: "wait" },
+        },
+      ],
+      variables: [
+        { kind: "input", id: "wait", label: "Wait", valueType: "numeric" },
+      ],
+    });
+    const derivedResult = ProtocolCore.inspectProtocol({
+      ...validProtocol,
+      sections: [
+        {
+          ...validProtocol.sections[0],
+          duration: { kind: "derived", variableId: "timer" },
+        },
+      ],
+      variables: [
+        {
+          kind: "derived",
+          id: "timer",
+          label: "Timer",
+          valueType: "numeric",
+          formula: "60",
+          precision: 0,
+          roundingMode: "half-even",
+        },
+      ],
+      formulaTestCases: [
+        {
+          testCaseId: uuid(1),
+          name: "Resolves the timer",
+          inputValues: {},
+          expectedDerivedValues: { timer: "60" },
+          precision: 0,
+          roundingMode: "half-even",
+        },
+      ],
+    });
+
+    expect(durationInputResult.playable).toBe(true);
+    expect(durationInputResult.errors).toEqual([]);
+    expect(numericInputResult.playable).toBe(true);
+    expect(numericInputResult.errors).toEqual([]);
+    expect(derivedResult.playable).toBe(true);
+    expect(derivedResult.errors).toEqual([]);
+  });
+
+  it("rejects text, boolean, and enum references for derived Section durations", () => {
+    const rejectedVariables: Array<
+      Extract<VariableDefinition, { kind: "input" }>
+    > = [
+      { kind: "input", id: "notes", label: "Notes", valueType: "text" },
+      { kind: "input", id: "flag", label: "Flag", valueType: "boolean" },
+      {
+        kind: "input",
+        id: "mode",
+        label: "Mode",
+        valueType: "enum",
+        options: ["fast", "slow"],
+      },
+    ];
+    for (const variable of rejectedVariables) {
+      const result = ProtocolCore.inspectProtocol({
+        ...validProtocol,
+        sections: [
+          {
+            ...validProtocol.sections[0],
+            duration: { kind: "derived", variableId: variable.id },
+          },
+        ],
+        variables: [variable],
+      });
+      expect(result.playable).toBe(false);
+      expect(result.errors).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            code: "invalid_duration_variable",
+            path: "sections.0.duration.variableId",
+          }),
+        ]),
+      );
+    }
+  });
+
+  it("owns Section duration candidate admissibility on the domain seam", () => {
+    // The same predicate behind the `invalid_duration_variable` check: any
+    // Derived Variable plus Numeric and Duration Input Variables.
+    const candidates: VariableDefinition[] = [
+      { kind: "input", id: "wait", label: "Wait", valueType: "numeric" },
+      {
+        kind: "input",
+        id: "soak",
+        label: "Soak",
+        valueType: "duration",
+        unit: "minute",
+      },
+      {
+        kind: "derived",
+        id: "timer",
+        label: "Timer",
+        valueType: "numeric",
+        formula: "60",
+        precision: 0,
+        roundingMode: "half-even",
+      },
+      {
+        kind: "derived",
+        id: "span",
+        label: "Span",
+        valueType: "duration",
+        unit: "hour",
+        formula: "soak",
+        precision: 2,
+        roundingMode: "half-even",
+      },
+    ];
+    for (const definition of candidates) {
+      expect(ProtocolCore.isSectionDurationCandidate(definition)).toBe(true);
+    }
+
+    const rejected: Array<
+      Extract<VariableDefinition, { kind: "input" }>
+    > = [
+      { kind: "input", id: "notes", label: "Notes", valueType: "text" },
+      { kind: "input", id: "flag", label: "Flag", valueType: "boolean" },
+      {
+        kind: "input",
+        id: "mode",
+        label: "Mode",
+        valueType: "enum",
+        options: ["fast", "slow"],
+      },
+    ];
+    for (const definition of rejected) {
+      expect(ProtocolCore.isSectionDurationCandidate(definition)).toBe(false);
+    }
+  });
+
   it("rejects invalid Input Variable defaults and constraints", () => {
     const result = ProtocolCore.inspectProtocol({
       ...validProtocol,
@@ -651,6 +816,320 @@ describe("ProtocolCore", () => {
       "invalid_variable_constraints",
       "invalid_variable_default",
     ]);
+  });
+
+  it("accepts a duration Input Variable and reports an unknown Duration Unit distinctly", () => {
+    const valid = ProtocolCore.inspectProtocol({
+      ...validProtocol,
+      variables: [
+        {
+          kind: "input",
+          id: "incubateMinutes",
+          label: "Incubation",
+          valueType: "duration",
+          unit: "minute",
+          defaultValue: "300",
+          minimum: "60",
+          maximum: "3600",
+        },
+      ],
+    });
+    expect(valid.format).toBe("valid");
+    expect(valid.playable).toBe(true);
+    expect(valid.errors).toEqual([]);
+
+    const invalidUnit = ProtocolCore.inspectProtocol({
+      ...validProtocol,
+      variables: [
+        {
+          kind: "input",
+          id: "incubateMinutes",
+          label: "Incubation",
+          valueType: "duration",
+          unit: "fortnight",
+        },
+      ],
+    });
+    expect(invalidUnit.format).toBe("valid");
+    expect(invalidUnit.playable).toBe(false);
+    expect(invalidUnit.errors).toEqual([
+      {
+        code: "invalid_duration_unit",
+        path: "variables.0.unit",
+        message: "Duration Variable unit must be second, minute, hour, or day",
+      },
+    ]);
+  });
+
+  it("rejects non-canonical duration seconds and inconsistent duration constraints", () => {
+    const nonCanonical = ProtocolCore.inspectProtocol({
+      ...validProtocol,
+      variables: [
+        {
+          kind: "input",
+          id: "incubateMinutes",
+          label: "Incubation",
+          valueType: "duration",
+          unit: "minute",
+          minimum: "060",
+        },
+      ],
+    });
+    expect(nonCanonical.format).toBe("invalid");
+    expect(nonCanonical.playable).toBe(false);
+
+    const inconsistent = ProtocolCore.inspectProtocol({
+      ...validProtocol,
+      variables: [
+        {
+          kind: "input",
+          id: "incubateMinutes",
+          label: "Incubation",
+          valueType: "duration",
+          unit: "minute",
+          defaultValue: "30",
+          minimum: "120",
+          maximum: "60",
+        },
+      ],
+    });
+    expect(inconsistent.format).toBe("valid");
+    expect(inconsistent.playable).toBe(false);
+    expect(inconsistent.errors.map((error) => error.code)).toEqual([
+      "invalid_variable_constraints",
+      "invalid_variable_default",
+    ]);
+    expect(inconsistent.errors.map((error) => error.path)).toEqual([
+      "variables.0",
+      "variables.0.defaultValue",
+    ]);
+  });
+
+  it("resolves duration entries from the declared unit into canonical seconds", () => {
+    const durationDefinition: Extract<
+      Protocol["variables"][number],
+      { valueType: "duration" }
+    > = {
+      kind: "input",
+      id: "incubateMinutes",
+      label: "Incubation",
+      valueType: "duration",
+      unit: "minute",
+      defaultValue: "300",
+    };
+    const protocol: Protocol = {
+      ...validProtocol,
+      variables: [durationDefinition],
+      formulaTestCases: [],
+    };
+
+    expect(
+      ProtocolCore.evaluateProtocol(protocol, { incubateMinutes: "2.5" }),
+    ).toEqual({ ok: true, values: { incubateMinutes: "150" } });
+    expect(ProtocolCore.evaluateProtocol(protocol, { incubateMinutes: "0" }))
+      .toEqual({ ok: true, values: { incubateMinutes: "0" } });
+    expect(ProtocolCore.evaluateProtocol(protocol, {})).toEqual({
+      ok: true,
+      values: { incubateMinutes: "300" },
+    });
+
+    const bounded: Protocol = {
+      ...protocol,
+      variables: [{ ...durationDefinition, minimum: "60", maximum: "3600" }],
+    };
+    expect(
+      ProtocolCore.evaluateProtocol(bounded, { incubateMinutes: "90" }),
+    ).toEqual({
+      ok: false,
+      errors: [
+        {
+          code: "invalid_input",
+          path: "inputValues.incubateMinutes",
+          message:
+            "incubateMinutes must be a non-negative decimal within its constraints",
+        },
+      ],
+    });
+  });
+
+  it("rejects invalid duration entries", () => {
+    const protocol: Protocol = {
+      ...validProtocol,
+      variables: [
+        {
+          kind: "input",
+          id: "incubateHours",
+          label: "Incubation",
+          valueType: "duration",
+          unit: "hour",
+        },
+      ],
+      formulaTestCases: [],
+    };
+
+    for (const entry of ["overnight", "-1", "1.2.3"]) {
+      expect(
+        ProtocolCore.evaluateProtocol(protocol, { incubateHours: entry }),
+      ).toEqual({
+        ok: false,
+        errors: [
+          {
+            code: "invalid_input",
+            path: "inputValues.incubateHours",
+            message:
+              "incubateHours must be a non-negative decimal within its constraints",
+          },
+        ],
+      });
+    }
+
+    // Entered decimals are lenient like the numeric kind and persist in
+    // canonical seconds.
+    expect(
+      ProtocolCore.evaluateProtocol(protocol, { incubateHours: "1e2" }),
+    ).toEqual({ ok: true, values: { incubateHours: "360000" } });
+  });
+
+  it("validates stored duration Variable Values without re-interpreting units", () => {
+    const protocol: Protocol = {
+      ...validProtocol,
+      variables: [
+        {
+          kind: "input",
+          id: "incubateMinutes",
+          label: "Incubation",
+          valueType: "duration",
+          unit: "minute",
+          minimum: "60",
+          maximum: "3600",
+        },
+      ],
+      formulaTestCases: [],
+    };
+
+    expect(
+      ProtocolCore.resolveVariableValues(
+        protocol,
+        { incubateMinutes: "300" },
+        "playback-session",
+      ),
+    ).toEqual({ ok: true, values: { incubateMinutes: "300" } });
+
+    // The stored "5" is canonical seconds, not a 5-minute entry: it violates
+    // the 60-second minimum instead of resolving to 300 seconds.
+    expect(
+      ProtocolCore.resolveVariableValues(
+        protocol,
+        { incubateMinutes: "5" },
+        "playback-session",
+      ),
+    ).toEqual({
+      ok: false,
+      errors: [
+        {
+          code: "invalid_input",
+          path: "values.incubateMinutes",
+          message:
+            "incubateMinutes must be a non-negative decimal within its constraints",
+        },
+      ],
+    });
+
+    expect(
+      ProtocolCore.resolveVariableValues(
+        protocol,
+        { incubateMinutes: "0301.5" },
+        "playback-session",
+      ),
+    ).toMatchObject({ ok: false });
+
+    expect(
+      ProtocolCore.resolveVariableValues(protocol, {}, "playback-session"),
+    ).toMatchObject({ ok: false });
+  });
+
+  it("formats duration values deterministically in the declared unit", () => {
+    // Exact conversions: 5400 seconds is 90 minutes, 1.5 hours, and
+    // 0.0625 days, rendered as plain decimals with unit symbols.
+    expect(ProtocolCore.formatDurationValue("5400", "second")).toBe("5400 s");
+    expect(ProtocolCore.formatDurationValue("5400", "minute")).toBe("90 min");
+    expect(ProtocolCore.formatDurationValue("5400", "hour")).toBe("1.5 h");
+    expect(ProtocolCore.formatDurationValue("5400", "day")).toBe("0.0625 d");
+    expect(ProtocolCore.formatDurationValue("60", "minute")).toBe("1 min");
+    expect(ProtocolCore.formatDurationValue("3600", "hour")).toBe("1 h");
+    expect(ProtocolCore.formatDurationValue("86400", "day")).toBe("1 d");
+
+    // Canonical zero normalizes in every unit.
+    expect(ProtocolCore.formatDurationValue("0", "second")).toBe("0 s");
+    expect(ProtocolCore.formatDurationValue("0", "minute")).toBe("0 min");
+    expect(ProtocolCore.formatDurationValue("0", "hour")).toBe("0 h");
+    expect(ProtocolCore.formatDurationValue("0", "day")).toBe("0 d");
+
+    // A value with maximum practical precision converts exactly in every
+    // unit: 0.000027 seconds is exactly divisible by each unit factor.
+    expect(ProtocolCore.formatDurationValue("0.000027", "second")).toBe(
+      "0.000027 s",
+    );
+    expect(ProtocolCore.formatDurationValue("0.000027", "minute")).toBe(
+      "0.00000045 min",
+    );
+    expect(ProtocolCore.formatDurationValue("0.000027", "hour")).toBe(
+      "0.0000000075 h",
+    );
+    expect(ProtocolCore.formatDurationValue("0.000027", "day")).toBe(
+      "0.0000000003125 d",
+    );
+
+    // Very small values stay plain decimals (never exponent notation) and
+    // round-trip exactly back to the stored canonical seconds.
+    const tiny = "0.000000000000000000000027";
+    for (const unit of ["second", "minute", "hour", "day"] as const) {
+      const rendered = ProtocolCore.formatDurationValue(tiny, unit);
+      expect(rendered).not.toMatch(/[eE]/);
+      expect(
+        ProtocolCore.convertDurationEntryToSeconds(
+          rendered.slice(0, rendered.length - DURATION_UNIT_SYMBOLS[unit].length - 1),
+          unit,
+        ),
+      ).toBe(tiny);
+    }
+
+    // Repeating expansions stay deterministic at the Decimal clone's
+    // precision and agree with the raw unit converter.
+    const repeating = ProtocolCore.formatDurationValue("1", "minute");
+    expect(repeating).toBe(ProtocolCore.formatDurationValue("1", "minute"));
+    const digits = repeating.slice(2, repeating.length - " min".length);
+    expect(digits).toMatch(/^01666+7$/);
+    expect(digits.length).toBe(121);
+    expect(repeating).toBe(
+      `${ProtocolCore.convertDurationSecondsToUnit("1", "minute")} min`,
+    );
+  });
+
+  it("renders Duration Unit symbols through one seam helper", () => {
+    expect(ProtocolCore.durationSymbol("second")).toBe("s");
+    expect(ProtocolCore.durationSymbol("minute")).toBe("min");
+    expect(ProtocolCore.durationSymbol("hour")).toBe("h");
+    expect(ProtocolCore.durationSymbol("day")).toBe("d");
+    // An unknown unit falls back to the raw string instead of inventing a
+    // symbol, matching the formatter's language-independent output.
+    expect(ProtocolCore.durationSymbol("fortnight")).toBe("fortnight");
+  });
+
+  it("keeps protocols without duration Variables inspecting identically", () => {
+    for (const protocol of [validProtocol, formulaProtocol]) {
+      const inspection = ProtocolCore.inspectProtocol(protocol);
+      expect(inspection.format).toBe("valid");
+      expect(inspection.playable).toBe(true);
+      expect(
+        inspection.errors.filter(
+          (error) =>
+            error.code === "invalid_duration_unit" ||
+            error.code === "invalid_variable_constraints" ||
+            error.code === "invalid_variable_default",
+        ),
+      ).toEqual([]);
+    }
   });
 
   it("keeps decimal division deterministic at the maximum declared precision", () => {
@@ -1326,5 +1805,484 @@ describe("ProtocolCore", () => {
         }),
       ]),
     );
+  });
+
+  const durationInput = (
+    id: string,
+    label: string,
+    unit: "second" | "minute" | "hour" | "day",
+  ): Extract<Protocol["variables"][number], { kind: "input" }> => ({
+    kind: "input",
+    id,
+    label,
+    valueType: "duration",
+    unit,
+  });
+
+  const durationDerived = (
+    id: string,
+    label: string,
+    formula: string,
+    unit: "second" | "minute" | "hour" | "day" = "minute",
+    valueType: "numeric" | "duration" = "duration",
+  ): Extract<Protocol["variables"][number], { kind: "derived" }> =>
+    valueType === "duration"
+      ? {
+          kind: "derived",
+          id,
+          label,
+          valueType: "duration",
+          unit,
+          formula,
+          precision: 2,
+          roundingMode: "half-even",
+        }
+      : {
+          kind: "derived",
+          id,
+          label,
+          valueType: "numeric",
+          formula,
+          precision: 2,
+          roundingMode: "half-even",
+        };
+
+  it("evaluates every legal duration operator combination into canonical seconds", () => {
+    const protocol: Protocol = {
+      ...validProtocol,
+      variables: [
+        durationInput("soakMinutes", "Soak", "minute"),
+        durationDerived("added", "Added", "soakMinutes + soakMinutes"),
+        durationDerived("scaled", "Scaled", "soakMinutes * 3"),
+        durationDerived("scaledReversed", "Scaled reversed", "3 * soakMinutes"),
+        durationDerived("difference", "Difference", "added - soakMinutes"),
+        durationDerived("floored", "Floored", "floor(soakMinutes / 7)"),
+        durationDerived("ceiled", "Ceiled", "ceil(soakMinutes / 7)"),
+        durationDerived("rounded", "Rounded", "round(soakMinutes / 7)"),
+        durationDerived("doubleNegated", "Double negated", "-(-soakMinutes)"),
+        durationDerived(
+          "homogeneousMin",
+          "Homogeneous min",
+          "min(soakMinutes, soakMinutes / 2)",
+        ),
+        durationDerived("halvedHours", "Halved hours", "soakMinutes / 2", "hour"),
+        durationDerived(
+          "soakRatio",
+          "Soak ratio",
+          "soakMinutes / halvedHours",
+          "minute",
+          "numeric",
+        ),
+        durationDerived(
+          "recovered",
+          "Recovered",
+          "soakRatio * halvedHours",
+        ),
+      ],
+    };
+
+    // soakMinutes entered as 90 minutes resolves to 5400 canonical seconds;
+    // every result below is stored in canonical seconds.
+    expect(
+      ProtocolCore.evaluateProtocol(protocol, { soakMinutes: "90" }),
+    ).toEqual({
+      ok: true,
+      values: {
+        soakMinutes: "5400",
+        added: "10800",
+        scaled: "16200",
+        scaledReversed: "16200",
+        difference: "5400",
+        floored: "720",
+        ceiled: "780",
+        rounded: "780",
+        doubleNegated: "5400",
+        homogeneousMin: "2700",
+        halvedHours: "2700",
+        soakRatio: "2",
+        recovered: "5400",
+      },
+    });
+  });
+
+  it("converts cross-unit duration references exactly", () => {
+    const protocol: Protocol = {
+      ...validProtocol,
+      variables: [
+        durationInput("incubateHours", "Incubation", "hour"),
+        durationInput("prepareHours", "Preparation", "hour"),
+        durationDerived("hoursAsMinutes", "Hours as minutes", "incubateHours"),
+        durationDerived("hoursAsSeconds", "Hours as seconds", "incubateHours", "second"),
+        durationDerived("hoursAsDays", "Hours as days", "prepareHours", "day"),
+        durationDerived("scaledToDays", "Scaled to days", "incubateHours * 48", "day"),
+        durationDerived("daysAsSeconds", "Days as seconds", "prepareHours", "second"),
+        durationDerived("daysAsMinutes", "Days as minutes", "prepareHours"),
+      ],
+    };
+
+    expect(
+      ProtocolCore.evaluateProtocol(protocol, {
+        incubateHours: "1",
+        prepareHours: "48",
+      }),
+    ).toEqual({
+      ok: true,
+      values: {
+        incubateHours: "3600",
+        prepareHours: "172800",
+        hoursAsMinutes: "3600",
+        hoursAsSeconds: "3600",
+        hoursAsDays: "172800",
+        scaledToDays: "172800",
+        daysAsSeconds: "172800",
+        daysAsMinutes: "172800",
+      },
+    });
+  });
+
+  it("rounds duration results in the declared unit", () => {
+    const protocol: Protocol = {
+      ...validProtocol,
+      variables: [
+        durationInput("soakHours", "Soak", "hour"),
+        durationInput("prepareDays", "Preparation", "day"),
+        durationDerived("roundedHours", "Rounded hours", "soakHours", "hour"),
+        durationDerived(
+          "roundedExplicit",
+          "Rounded explicit",
+          "round(soakHours, 1)",
+          "hour",
+        ),
+        durationDerived("ceiledHours", "Ceiled hours", "ceil(soakHours)", "hour"),
+        durationDerived("flooredHours", "Floored hours", "floor(soakHours)", "hour"),
+        durationDerived("secondsKept", "Seconds kept", "soakHours", "second"),
+        durationDerived("wholeDays", "Whole days", "round(prepareDays)", "day"),
+      ],
+    };
+
+    // 1.005 hours resolves to 3618 seconds. Rounding happens in the declared
+    // unit (hour precision 2 half-even collapses 1.005 to 1.00; ceil in hour
+    // space reaches 2 h; round without places is zero decimals of the
+    // declared unit), never in seconds.
+    expect(
+      ProtocolCore.evaluateProtocol(protocol, {
+        soakHours: "1.005",
+        prepareDays: "1.5",
+      }),
+    ).toEqual({
+      ok: true,
+      values: {
+        soakHours: "3618",
+        prepareDays: "129600",
+        roundedHours: "3600",
+        roundedExplicit: "3600",
+        ceiledHours: "7200",
+        flooredHours: "3600",
+        secondsKept: "3618",
+        wholeDays: "172800",
+      },
+    });
+  });
+
+  it("reports a negative final duration while intermediate negatives evaluate freely", () => {
+    const baseVariables = [
+      durationInput("soakMinutes", "Soak", "minute"),
+      durationInput("restMinutes", "Rest", "minute"),
+    ];
+    const negativeFinal: Protocol = {
+      ...validProtocol,
+      variables: [
+        ...baseVariables,
+        durationDerived("delta", "Delta", "soakMinutes - restMinutes"),
+      ],
+    };
+    const intermediateNegative: Protocol = {
+      ...validProtocol,
+      variables: [
+        ...baseVariables,
+        durationDerived(
+          "recovered",
+          "Recovered",
+          "soakMinutes - restMinutes + restMinutes",
+        ),
+        durationDerived("balance", "Balance", "1 - 4", "minute", "numeric"),
+      ],
+    };
+
+    expect(
+      ProtocolCore.evaluateProtocol(negativeFinal, {
+        soakMinutes: "30",
+        restMinutes: "90",
+      }),
+    ).toEqual({
+      ok: false,
+      errors: [
+        {
+          code: "negative_duration",
+          path: "variables.2.formula",
+          message: "A Duration Derived Variable result may not be negative",
+        },
+      ],
+    });
+    expect(
+      ProtocolCore.evaluateProtocol(intermediateNegative, {
+        soakMinutes: "30",
+        restMinutes: "90",
+      }),
+    ).toEqual({
+      ok: true,
+      values: {
+        soakMinutes: "1800",
+        restMinutes: "5400",
+        recovered: "1800",
+        balance: "-3",
+      },
+    });
+  });
+
+  it.each([
+    ["duration_plus_numeric", "soakMinutes + ratio", "duration"],
+    ["numeric_plus_duration", "ratio + soakMinutes", "duration"],
+    ["duration_minus_numeric", "soakMinutes - ratio", "duration"],
+    ["numeric_minus_duration", "ratio - soakMinutes", "duration"],
+    ["duration_times_duration", "soakMinutes * soakMinutes", "duration"],
+    ["numeric_divided_by_duration", "ratio / soakMinutes", "duration"],
+    ["mixed_min_max_arguments", "min(soakMinutes, ratio)", "duration"],
+    ["duration_result_in_numeric_formula", "soakMinutes", "numeric"],
+    ["numeric_result_in_duration_formula", "ratio", "duration"],
+  ] as const)(
+    "rejects %s at Authoring time and during evaluation",
+    (code, formula, valueType) => {
+      const protocol: Protocol = {
+        ...validProtocol,
+        variables: [
+          durationInput("soakMinutes", "Soak", "minute"),
+          {
+            kind: "input",
+            id: "ratio",
+            label: "Ratio",
+            valueType: "numeric",
+          },
+          durationDerived("target", "Target", formula, "minute", valueType),
+        ],
+      };
+
+      // Inspection surfaces the distinct dimension diagnostic without
+      // evaluating: the dependency graph reports it even though no Formula
+      // Test Case exists yet.
+      const inspection = ProtocolCore.inspectProtocol(protocol);
+      expect(inspection.playable).toBe(false);
+      expect(inspection.errors).toEqual(
+        expect.arrayContaining([
+          {
+            code,
+            path: "variables.2.formula",
+            message: expect.any(String),
+          },
+        ]),
+      );
+
+      const graph = ProtocolCore.inspectVariableDependencyGraph(protocol);
+      expect(graph.diagnostics).toEqual([
+        expect.objectContaining({
+          kind: "dimension-mismatch",
+          code,
+          path: "variables.2.formula",
+          variableId: "target",
+          variableIndex: 2,
+        }),
+      ]);
+      expect(
+        graph.nodes.find((node) => node.id === "target"),
+      ).toMatchObject({
+        diagnosticCodes: [code],
+      });
+
+      const evaluation = ProtocolCore.evaluateProtocol(protocol, {
+        soakMinutes: "30",
+        ratio: "2",
+      });
+      expect(evaluation).toMatchObject({
+        ok: false,
+        errors: [expect.objectContaining({ code })],
+      });
+    },
+  );
+
+  it("reports a duration-derived target with a non-numeric reference as non-numeric", () => {
+    const graph = ProtocolCore.inspectVariableDependencyGraph({
+      ...validProtocol,
+      variables: [
+        {
+          kind: "input",
+          id: "flag",
+          label: "Flag",
+          valueType: "boolean",
+        },
+        durationInput("soakMinutes", "Soak", "minute"),
+        durationDerived("target", "Target", "flag + soakMinutes"),
+      ],
+    });
+
+    expect(graph.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "non-numeric-reference",
+          code: "non_numeric_variable",
+          referencedVariableId: "flag",
+        }),
+      ]),
+    );
+  });
+
+  it("carries dimension diagnostics on the matching graph nodes and edges", () => {
+    const protocol: Protocol = {
+      ...validProtocol,
+      variables: [
+        {
+          kind: "input",
+          id: "ratio",
+          label: "Ratio",
+          valueType: "numeric",
+        },
+        durationInput("soakMinutes", "Soak", "minute"),
+        durationDerived("total", "Total", "ratio + soakMinutes"),
+      ],
+    };
+    const graph = ProtocolCore.inspectVariableDependencyGraph(protocol);
+
+    expect(graph.diagnostics).toEqual([
+      {
+        kind: "dimension-mismatch",
+        code: "numeric_plus_duration",
+        path: "variables.2.formula",
+        message: "A formula cannot add a Duration to a number",
+        variableId: "total",
+        variableIndex: 2,
+        referencedVariableIds: ["ratio", "soakMinutes"],
+        nodeIds: ["ratio", "soakMinutes", "total"],
+        edgeIds: ["ratio->total", "soakMinutes->total"],
+      },
+    ]);
+    expect(
+      graph.edges.map(({ id, diagnosticCodes }) => ({ id, diagnosticCodes })),
+    ).toEqual([
+      { id: "ratio->total", diagnosticCodes: ["numeric_plus_duration"] },
+      {
+        id: "soakMinutes->total",
+        diagnosticCodes: ["numeric_plus_duration"],
+      },
+    ]);
+    expect(
+      graph.nodes.map(({ id, diagnosticCodes }) => ({ id, diagnosticCodes })),
+    ).toEqual([
+      { id: "ratio", diagnosticCodes: [] },
+      { id: "soakMinutes", diagnosticCodes: [] },
+      { id: "total", diagnosticCodes: ["numeric_plus_duration"] },
+    ]);
+
+    const inspection = ProtocolCore.inspectProtocol(protocol);
+    expect(inspection.errors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "numeric_plus_duration",
+          path: "variables.2.formula",
+        }),
+      ]),
+    );
+  });
+
+  it("compares duration Formula Test Case expectations in the declared unit", () => {
+    const baseProtocol: Protocol = {
+      ...validProtocol,
+      variables: [
+        durationInput("soakHours", "Soak", "hour"),
+        durationDerived("inMinutes", "In minutes", "soakHours"),
+        durationDerived("inHours", "In hours", "soakHours", "hour"),
+      ],
+    };
+    const withExpectations = (
+      expected: Record<string, string>,
+      precision = 2,
+    ): Protocol => ({
+      ...baseProtocol,
+      formulaTestCases: [
+        {
+          testCaseId: uuid(4_001),
+          name: "Duration expectations",
+          inputValues: { soakHours: "1" },
+          expectedDerivedValues: expected,
+          precision,
+          roundingMode: "half-even",
+        },
+      ],
+    });
+
+    // Canonical-seconds expectations pass for both declared units.
+    expect(
+      ProtocolCore.inspectProtocol(
+        withExpectations({ inMinutes: "3600", inHours: "3600" }),
+      ),
+    ).toMatchObject({ playable: true, errors: [] });
+
+    // The declared unit is the rounding authority: 3601 seconds differs from
+    // 3600 by 0.00028 hours, which collapses at test-case precision 2 in hour
+    // space (while minutes keep full resolution).
+    expect(
+      ProtocolCore.inspectProtocol(
+        withExpectations({ inMinutes: "3600", inHours: "3601" }),
+      ),
+    ).toMatchObject({ playable: true, errors: [] });
+
+    expect(
+      ProtocolCore.inspectProtocol(
+        withExpectations({ inMinutes: "3900", inHours: "3600" }),
+      ),
+    ).toMatchObject({
+      playable: false,
+      errors: [
+        expect.objectContaining({
+          code: "formula_test_failed",
+          path: "formulaTestCases.0.expectedDerivedValues.inMinutes",
+        }),
+      ],
+    });
+  });
+
+  it("reports an unknown Duration Unit on a Duration Derived Variable distinctly", () => {
+    const inspection = ProtocolCore.inspectProtocol({
+      ...validProtocol,
+      variables: [durationDerived("fortnightTotal", "Fortnight", "1", "fortnight" as never)],
+    });
+    expect(inspection.format).toBe("valid");
+    expect(inspection.playable).toBe(false);
+    expect(inspection.errors).toEqual(
+      expect.arrayContaining([
+        {
+          code: "invalid_duration_unit",
+          path: "variables.0.unit",
+          message: "Duration Variable unit must be second, minute, hour, or day",
+        },
+      ]),
+    );
+
+    const evaluation = ProtocolCore.evaluateProtocol(
+      {
+        ...validProtocol,
+        variables: [
+          durationDerived("fortnightTotal", "Fortnight", "60 + 60", "fortnight" as never),
+        ],
+      },
+      {},
+    );
+    expect(evaluation).toMatchObject({
+      ok: false,
+      errors: [
+        expect.objectContaining({
+          code: "invalid_duration_unit",
+          path: "variables.0.formula",
+        }),
+      ],
+    });
   });
 });

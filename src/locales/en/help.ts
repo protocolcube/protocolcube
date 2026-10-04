@@ -105,6 +105,12 @@ export const help = {
   "help.glossary.derivedVariable.term": "Derived Variable",
   "help.glossary.derivedVariable.definition":
     "A Variable Definition whose value is calculated from Input Variables or other Derived Variables by an Author-defined formula.",
+  "help.glossary.durationVariable.term": "Duration Variable",
+  "help.glossary.durationVariable.definition":
+    "A Variable Definition whose value represents a time span, entered and presented in a Duration Unit and computed in canonical seconds.",
+  "help.glossary.durationUnit.term": "Duration Unit",
+  "help.glossary.durationUnit.definition":
+    "A unit of time—second, minute, hour, or day—declared by the Author for entering and presenting a Duration Variable's value.",
   "help.glossary.variableValue.term": "Variable Value",
   "help.glossary.variableValue.definition":
     "A resolved value for an Input Variable or Derived Variable during a Playback Session.",

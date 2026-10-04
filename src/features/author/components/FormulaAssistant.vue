@@ -7,12 +7,17 @@ import {
   type Protocol,
   type VariableDefinition,
   type VariableValue,
+  isDurationUnit,
 } from "@/domain/protocol";
 
 const props = defineProps<{
   protocol: Protocol;
   variableId: string;
   formula: string;
+  /** Declared type of the Derived Variable being previewed. */
+  valueType?: "numeric" | "duration";
+  /** Declared Duration Unit used when valueType is "duration". */
+  unit?: string;
 }>();
 const emit = defineEmits<{
   learn: [];
@@ -28,13 +33,26 @@ const numericReferences = computed(() =>
   props.protocol.variables.filter(
     (variable) =>
       variable.id !== props.variableId &&
-      (variable.kind === "derived" || variable.valueType === "numeric"),
+      (variable.kind === "derived" ||
+        variable.valueType === "numeric" ||
+        variable.valueType === "duration"),
   ),
 );
 
 function initialPreviewValue(
   variable: Extract<VariableDefinition, { kind: "input" }>,
 ): VariableValue {
+  // Duration defaults are stored as canonical seconds; preview entries are
+  // expressed in the declared Duration Unit like Reader entries.
+  if (variable.valueType === "duration") {
+    if (variable.defaultValue === undefined || !isDurationUnit(variable.unit)) {
+      return "1";
+    }
+    return ProtocolCore.convertDurationSecondsToUnit(
+      variable.defaultValue,
+      variable.unit,
+    );
+  }
   if (variable.defaultValue !== undefined) return variable.defaultValue;
   if (variable.valueType === "boolean") return false;
   if (variable.valueType === "enum") return variable.options[0] ?? "";
@@ -66,15 +84,44 @@ const previewDefinition = computed<
   const existing = props.protocol.variables.find(
     (variable) => variable.id === variableId,
   );
+  const valueType =
+    existing?.kind === "derived"
+      ? existing.valueType
+      : props.valueType === "duration"
+        ? "duration"
+        : "numeric";
+  const unit =
+    existing?.kind === "derived" &&
+    existing.valueType === "duration" &&
+    isDurationUnit(existing.unit)
+      ? existing.unit
+      : props.unit !== undefined && isDurationUnit(props.unit)
+        ? props.unit
+        : "minute";
+  const label = existing?.label ?? variableId;
+  const precision = existing?.kind === "derived" ? existing.precision : 2;
+  const roundingMode =
+    existing?.kind === "derived" ? existing.roundingMode : "half-even";
+  if (valueType === "duration") {
+    return {
+      kind: "derived",
+      id: variableId,
+      label,
+      valueType: "duration",
+      unit,
+      formula,
+      precision,
+      roundingMode,
+    };
+  }
   return {
     kind: "derived",
     id: variableId,
-    label: existing?.label ?? variableId,
+    label,
     valueType: "numeric",
     formula,
-    precision: existing?.kind === "derived" ? existing.precision : 2,
-    roundingMode:
-      existing?.kind === "derived" ? existing.roundingMode : "half-even",
+    precision,
+    roundingMode,
   };
 });
 
@@ -97,7 +144,18 @@ const previewResult = computed(() => {
   const result = evaluation.value;
   const definition = previewDefinition.value;
   if (!result?.ok || !definition) return undefined;
-  return result.values[definition.id];
+  const value = result.values[definition.id];
+  if (
+    typeof value === "string" &&
+    definition.valueType === "duration" &&
+    isDurationUnit(definition.unit)
+  ) {
+    // Render through the single domain formatter so the Assistant presents
+    // the value exactly as Readers will see it, e.g. "1.5 h". Storage
+    // remains canonical seconds.
+    return ProtocolCore.formatDurationValue(value, definition.unit);
+  }
+  return value;
 });
 </script>
 
@@ -148,7 +206,7 @@ const previewResult = computed(() => {
     </p>
 
     <div class="mt-3 grid gap-[.45rem] border-t border-border pt-3 text-[.76rem]">
-      <strong>Available numeric Variable IDs</strong>
+      <strong>Available numeric and Duration Variable IDs</strong>
       <div v-if="numericReferences.length" class="flex flex-wrap gap-[.35rem]">
         <code
           v-for="variable in numericReferences"
@@ -159,22 +217,22 @@ const previewResult = computed(() => {
         </code>
       </div>
       <span v-else class="text-muted-foreground">
-        Add a Numeric Input Variable before referencing it.
+        Add a Numeric or Duration Input Variable before referencing it.
       </span>
     </div>
 
     <div
-      v-if="inputDefinitions.some(variable => variable.valueType === 'numeric')"
+      v-if="inputDefinitions.some(variable => variable.valueType === 'numeric' || variable.valueType === 'duration')"
       class="mt-3 grid grid-cols-[repeat(auto-fit,minmax(11rem,1fr))] gap-[.6rem]"
     >
       <label
         v-for="variable in inputDefinitions.filter(
-          candidate => candidate.valueType === 'numeric',
+          candidate => candidate.valueType === 'numeric' || candidate.valueType === 'duration',
         )"
         :key="variable.id"
         class="m-0 text-[.74rem]"
       >
-        Preview value for {{ variable.label }}
+        Preview value for {{ variable.label }}<template v-if="variable.valueType === 'duration' && isDurationUnit(variable.unit)"> ({{ ProtocolCore.durationSymbol(variable.unit) }})</template>
         <input
           class="mt-[.35rem] w-full rounded-[calc(var(--radius)-2px)] border border-input bg-background p-2 font-mono text-foreground"
           :value="previewValues[variable.id]"

@@ -1639,3 +1639,809 @@ test("Reader configures and completes a Published Protocol offline on a narrow s
   await expect(clearSessionButton).toBeFocused();
   expect(requests).toEqual([]);
 });
+
+test("Author declares a Duration Input Variable and stores canonical seconds", async ({
+  page,
+}, testInfo) => {
+  testInfo.setTimeout(60_000);
+  await page.addInitScript(() => {
+    localStorage.setItem("protocol-box:locale", "en");
+  });
+  await page.goto(pathToFileURL(`${process.cwd()}/dist/index.html`).href);
+  await createAuthorKey(page, "duration variable passphrase");
+  await expect(page.getByRole("heading", { name: "Unsigned Drafts" }))
+    .toBeVisible({ timeout: 15_000 });
+
+  await page
+    .getByRole("button", { name: "New Unsigned Draft" })
+    .first()
+    .press("Enter");
+  const newDraftDialog = page.getByRole("dialog", {
+    name: "New Unsigned Draft",
+  });
+  await newDraftDialog.getByLabel("Protocol title").fill("Duration protocol");
+  await newDraftDialog
+    .getByRole("button", { name: "Create Unsigned Draft" })
+    .press("Enter");
+  await expect(
+    page.getByRole("navigation", { name: "Protocol Sections" }),
+  ).toBeVisible();
+
+  const authorWorkspace = page.getByRole("tablist", {
+    name: "Author workspace",
+  });
+  await authorWorkspace.getByRole("tab", { name: "Variables" }).press("Enter");
+  await page.getByRole("button", { name: "Add Variable" }).press("Enter");
+  const variableForm = page
+    .locator('[data-slot="card"]')
+    .filter({ hasText: "New Variable Definition" });
+  await variableForm.getByLabel("Variable ID").fill("soakMinutes");
+  await variableForm.getByLabel("Label", { exact: true }).fill("Soak duration");
+  await variableForm.getByRole("combobox", { name: "Type" }).press("Enter");
+  await page.getByRole("option", { name: "Duration Input" }).press("Enter");
+
+  // The unit selector defaults to minute and the Default/Minimum/Maximum
+  // fields are entered in the declared unit.
+  await expect(
+    variableForm.getByRole("combobox", { name: "Unit" }),
+  ).toHaveText("Minute (min)");
+  await variableForm.getByLabel("Default").fill("5");
+  await variableForm.getByLabel("Minimum").fill("1");
+  await variableForm.getByLabel("Maximum").fill("60");
+  await variableForm
+    .getByRole("button", { name: "Add Variable Definition" })
+    .press("Enter");
+
+  const definitionRow = page
+    .getByRole("table", { name: "Variable Definitions" })
+    .getByRole("row")
+    .filter({ hasText: "soakMinutes" });
+  await expect(definitionRow).toContainText("duration (min)");
+  await expect(definitionRow).toContainText("5");
+
+  // Publishing requires the Unsigned Draft to be saved first.
+  await page.getByRole("button", { name: "Save", exact: true }).press("Enter");
+  await expect(page.getByRole("status")).toContainText(
+    "Unsigned Draft saved",
+    { timeout: 15_000 },
+  );
+
+  await page.evaluate(() => {
+    const files = new Map<string, string>();
+    Object.defineProperty(globalThis, "__publishedFiles", { value: files });
+    Object.defineProperty(globalThis, "showSaveFilePicker", {
+      value: async (options: { suggestedName: string }) => ({
+        name: options.suggestedName,
+        createWritable: async () => ({
+          write: async (bytes: Uint8Array) => {
+            files.set(
+              options.suggestedName,
+              new TextDecoder().decode(bytes),
+            );
+          },
+          close: async () => undefined,
+        }),
+      }),
+    });
+  });
+
+  const workspaceRail = page.getByRole("navigation", {
+    name: "Author workspace areas",
+  });
+  await workspaceRail.getByRole("button", { name: "Publish" }).press("Enter");
+  await page.getByLabel("Published HTML filename").fill(
+    "duration-variable.html",
+  );
+  await page.getByRole("button", { name: "Publish Protocol" }).press("Enter");
+  const publishDialog = page.getByRole("dialog", {
+    name: "Publish Protocol files?",
+  });
+  await publishDialog
+    .getByRole("button", { name: "Continue to File Picker" })
+    .press("Enter");
+  await expect(
+    page.getByRole("heading", { name: "Publication Complete" }),
+  ).toBeVisible();
+  const publishedFiles = await page.evaluate(() =>
+    [...(globalThis as typeof globalThis & {
+      __publishedFiles: Map<string, string>;
+    }).__publishedFiles.entries()],
+  );
+  expect(publishedFiles.map(([name]) => name)).toEqual([
+    "duration-variable.html",
+    "duration-variable.html.sha256",
+  ]);
+
+  // The saved definition stores canonical seconds, not declared-unit entries.
+  const dataBlockStart =
+    '<script id="protocol-box-data" type="application/octet-stream">';
+  const html = publishedFiles[0]![1];
+  const contentStart = html.indexOf(dataBlockStart) + dataBlockStart.length;
+  const contentEnd = html.indexOf("</script>", contentStart);
+  const decoded = ProtocolCore.decodeEnvelope(
+    html.slice(contentStart, contentEnd),
+  );
+  expect(decoded.ok).toBe(true);
+  if (!decoded.ok) throw new Error("Expected a decodable envelope");
+  expect(decoded.envelope.protocol?.variables).toEqual([
+    {
+      kind: "input",
+      id: "soakMinutes",
+      label: "Soak duration",
+      valueType: "duration",
+      unit: "minute",
+      defaultValue: "300",
+      minimum: "60",
+      maximum: "3600",
+    },
+  ]);
+});
+
+test("Reader configures, persists, and restores a Duration Input Variable", async ({
+  page,
+  context,
+}, testInfo) => {
+  testInfo.setTimeout(60_000);
+  const protocol: Protocol = {
+    protocolId: "018f7f3e-7b1d-7a91-bf10-8f767a9c0f90",
+    title: "Duration Reader",
+    sections: [
+      {
+        sectionId: "018f7f3e-7b1d-7a91-bf10-8f767a9c0f91",
+        title: "Soak the sample",
+        markdown: "Soak the sample.\n\n- [ ] Confirm the soak.",
+        duration: { kind: "untimed" },
+        endAction: "advance",
+        completionRequirement: "all-task-items",
+      },
+      {
+        sectionId: "018f7f3e-7b1d-7a91-bf10-8f767a9c0f92",
+        title: "Wait",
+        markdown: "Wait for the timer.",
+        duration: { kind: "untimed" },
+        endAction: "wait",
+      },
+    ],
+    variables: [
+      {
+        kind: "input",
+        id: "soakMinutes",
+        label: "Soak duration",
+        valueType: "duration",
+        unit: "minute",
+        minimum: "60",
+        maximum: "3600",
+      },
+    ],
+    formulaTestCases: [],
+  };
+  const keys = await ProtocolCore.generateAuthorKeyPair();
+  const signature = await ProtocolCore.signProtocol(
+    protocol,
+    keys.privateKey,
+    keys.publicKey,
+  );
+  const envelope = ProtocolCore.encodeEnvelope({
+    documentKind: "protocol-box/published-protocol",
+    formatVersion: 1,
+    appVersion: "0.0.0",
+    protocol,
+    signature,
+  });
+  const applicationHtml = await readFile(
+    `${process.cwd()}/dist/index.html`,
+    "utf8",
+  );
+  const dataBlockStart =
+    '<script id="protocol-box-data" type="application/octet-stream">';
+  const contentStart =
+    applicationHtml.indexOf(dataBlockStart) + dataBlockStart.length;
+  const contentEnd = applicationHtml.indexOf("</script>", contentStart);
+  const publishedHtml =
+    applicationHtml.slice(0, contentStart) +
+    envelope +
+    applicationHtml.slice(contentEnd);
+  const publishedPath = testInfo.outputPath("duration-reader.html");
+  await writeFile(publishedPath, publishedHtml, "utf8");
+
+  await context.setOffline(true);
+  await page.goto(pathToFileURL(publishedPath).href);
+  await expect(
+    page.getByRole("heading", { name: "Duration Reader" }),
+  ).toBeVisible();
+
+  // The configuration field carries the declared unit as a fixed label, and
+  // constraints are presented in the declared unit.
+  const soakField = page.getByLabel("Soak duration");
+  await expect(soakField).toHaveValue("");
+  await expect(page.getByText("min", { exact: true })).toBeVisible();
+  await expect(page.getByText("Minimum: 1", { exact: true })).toBeVisible();
+  await expect(page.getByText("Maximum: 60", { exact: true })).toBeVisible();
+
+  const startButton = page.getByRole("button", { name: "Start Playback" });
+  const configurationErrors = page.locator(".configuration-errors");
+  for (const entry of ["abc", "-1", "0.5", "120"]) {
+    await soakField.fill(entry);
+    await expect(configurationErrors).toContainText(
+      "The Variable Value for Soak duration does not meet its declared type or constraints.",
+    );
+    await expect(startButton).toBeDisabled();
+  }
+  await soakField.fill("5");
+  await expect(startButton).toBeEnabled();
+
+  const storageGroup = page.getByRole("group", {
+    name: "Playback Session storage",
+  });
+  await storageGroup
+    .getByRole("radio", { name: "Persistent on this browser" })
+    .press("Space");
+  const confirmationCheckbox = storageGroup.getByRole("checkbox");
+  await confirmationCheckbox.focus();
+  await confirmationCheckbox.press("Space");
+  await expect(confirmationCheckbox).toBeChecked();
+  await startButton.press("Enter");
+  await expect(
+    page.getByRole("navigation", { name: "Reader progress" }).locator(
+      '[aria-current="step"]',
+    ),
+  ).toHaveText("Playback");
+  await expect(
+    page.getByRole("heading", { name: "Soak the sample" }),
+  ).toBeVisible();
+
+  // The Playback Session persists the resolved Variable Value: canonical
+  // seconds for the entered 5 minutes. (The app stores "session" storage in
+  // localStorage.)
+  const fingerprint = await ProtocolCore.fingerprintProtocol(protocol);
+  const storedRaw = await page.evaluate(
+    (key) => localStorage.getItem(key),
+    `protocol-box:playback:${fingerprint}`,
+  );
+  expect(JSON.parse(storedRaw!)).toMatchObject({
+    values: { soakMinutes: "300" },
+  });
+
+  const checklistItem = page.getByRole("checkbox", {
+    name: "Task item checkbox for Confirm the soak.",
+  });
+  await checklistItem.press("Space");
+  await page.getByRole("button", { name: "Complete Section" }).press("Enter");
+  await expect(
+    page.getByRole("heading", { name: "Wait" }),
+  ).toBeVisible();
+
+  await page.reload();
+  await expect(
+    page.getByText("Persistent Playback Session restored and paused"),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("navigation", { name: "Reader progress" }).locator(
+      '[aria-current="step"]',
+    ),
+  ).toHaveText("Playback");
+  await expect(
+    page.getByRole("heading", { name: "Wait" }),
+  ).toBeVisible();
+});
+
+test("Reader renders an interpolated Duration Variable in its declared unit", async ({
+  page,
+  context,
+}, testInfo) => {
+  testInfo.setTimeout(60_000);
+  const protocol: Protocol = {
+    protocolId: "018f7f3e-7b1d-7a91-bf10-8f767a9c0f96",
+    title: "Duration Interpolation",
+    sections: [
+      {
+        sectionId: "018f7f3e-7b1d-7a91-bf10-8f767a9c0f97",
+        title: "Prepare {{ soakHours }}",
+        markdown: "Soak the sample.\n\n- [ ] Confirm the soak.",
+        duration: { kind: "untimed" },
+        endAction: "advance",
+        completionRequirement: "all-task-items",
+      },
+      {
+        sectionId: "018f7f3e-7b1d-7a91-bf10-8f767a9c0f98",
+        title: "Wrap up",
+        markdown: "Finish the procedure.",
+        duration: { kind: "untimed" },
+        endAction: "wait",
+      },
+    ],
+    variables: [
+      {
+        kind: "input",
+        id: "soakHours",
+        label: "Soak hours",
+        valueType: "duration",
+        unit: "hour",
+        minimum: "1800",
+        maximum: "7200",
+      },
+      {
+        kind: "derived",
+        id: "soakInMinutes",
+        label: "Soak in minutes",
+        valueType: "duration",
+        unit: "minute",
+        formula: "soakHours",
+        precision: 2,
+        roundingMode: "half-even",
+      },
+    ],
+    formulaTestCases: [
+      {
+        testCaseId: "018f7f3e-7b1d-7a91-bf10-8f767a9c0f99",
+        name: "Passes the soak through in minutes",
+        inputValues: { soakHours: "1" },
+        expectedDerivedValues: { soakInMinutes: "3600" },
+        precision: 2,
+        roundingMode: "half-even",
+      },
+    ],
+  };
+  const keys = await ProtocolCore.generateAuthorKeyPair();
+  const signature = await ProtocolCore.signProtocol(
+    protocol,
+    keys.privateKey,
+    keys.publicKey,
+  );
+  const envelope = ProtocolCore.encodeEnvelope({
+    documentKind: "protocol-box/published-protocol",
+    formatVersion: 1,
+    appVersion: "0.0.0",
+    protocol,
+    signature,
+  });
+  const applicationHtml = await readFile(
+    `${process.cwd()}/dist/index.html`,
+    "utf8",
+  );
+  const dataBlockStart =
+    '<script id="protocol-box-data" type="application/octet-stream">';
+  const contentStart =
+    applicationHtml.indexOf(dataBlockStart) + dataBlockStart.length;
+  const contentEnd = applicationHtml.indexOf("</script>", contentStart);
+  const publishedHtml =
+    applicationHtml.slice(0, contentStart) +
+    envelope +
+    applicationHtml.slice(contentEnd);
+  const publishedPath = testInfo.outputPath("duration-interpolation.html");
+  await writeFile(publishedPath, publishedHtml, "utf8");
+
+  await context.setOffline(true);
+  await page.goto(pathToFileURL(publishedPath).href);
+  await expect(
+    page.getByRole("heading", { name: "Duration Interpolation" }),
+  ).toBeVisible();
+
+  // Entering 1.5 hours stores canonical seconds (5400) and the step text
+  // interpolates the domain-formatted declared-unit value, not raw seconds.
+  await page.getByLabel("Soak hours").fill("1.5");
+
+  // The configuration Derived panel presents the Duration Derived Variable
+  // through the single domain formatter in its declared unit (5400 s is
+  // `90 min`), not raw canonical seconds.
+  await expect(page.getByText("90 min", { exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "Start Playback" }).press("Enter");
+  await expect(
+    page.getByRole("heading", { name: "Prepare 1.5 h" }),
+  ).toBeVisible();
+
+  // The Completion Summary shows the same formatted string.
+  await page
+    .getByRole("checkbox", { name: "Task item checkbox for Confirm the soak." })
+    .press("Space");
+  await page.getByRole("button", { name: "Complete Section" }).press("Enter");
+  await expect(
+    page.getByRole("heading", { name: "Wrap up" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Complete Section" }).press("Enter");
+  await expect(page.getByText("Soak hours")).toBeVisible();
+  await expect(page.getByText("1.5 h", { exact: true })).toBeVisible();
+});
+
+test("a configured Duration Input Variable drives a Section timer", async ({
+  page,
+  context,
+}, testInfo) => {
+  testInfo.setTimeout(60_000);
+  await page.addInitScript(() => {
+    localStorage.setItem("protocol-box:locale", "en");
+  });
+  await page.goto(pathToFileURL(`${process.cwd()}/dist/index.html`).href);
+  await createAuthorKey(page, "duration timer passphrase");
+  await expect(page.getByRole("heading", { name: "Unsigned Drafts" }))
+    .toBeVisible({ timeout: 15_000 });
+
+  await page
+    .getByRole("button", { name: "New Unsigned Draft" })
+    .first()
+    .press("Enter");
+  const newDraftDialog = page.getByRole("dialog", {
+    name: "New Unsigned Draft",
+  });
+  await newDraftDialog.getByLabel("Protocol title").fill("Duration timer protocol");
+  await newDraftDialog
+    .getByRole("button", { name: "Create Unsigned Draft" })
+    .press("Enter");
+  await expect(
+    page.getByRole("navigation", { name: "Protocol Sections" }),
+  ).toBeVisible();
+
+  const authorWorkspace = page.getByRole("tablist", {
+    name: "Author workspace",
+  });
+  await authorWorkspace.getByRole("tab", { name: "Variables" }).press("Enter");
+  await page.getByRole("button", { name: "Add Variable" }).press("Enter");
+  const variableForm = page
+    .locator('[data-slot="card"]')
+    .filter({ hasText: "New Variable Definition" });
+  await variableForm.getByLabel("Variable ID").fill("soakMinutes");
+  await variableForm.getByLabel("Label", { exact: true }).fill("Soak duration");
+  await variableForm.getByRole("combobox", { name: "Type" }).press("Enter");
+  await page.getByRole("option", { name: "Duration Input" }).press("Enter");
+  await variableForm.getByLabel("Maximum").fill("60");
+  await variableForm
+    .getByRole("button", { name: "Add Variable Definition" })
+    .press("Enter");
+  await page.getByRole("button", { name: "Add Variable" }).press("Enter");
+  await variableForm.getByLabel("Variable ID").fill("waitSeconds");
+  await variableForm.getByLabel("Label", { exact: true }).fill("Wait seconds");
+  await variableForm.getByRole("combobox", { name: "Type" }).press("Enter");
+  await page.getByRole("option", { name: "Numeric Input" }).press("Enter");
+  await variableForm
+    .getByRole("button", { name: "Add Variable Definition" })
+    .press("Enter");
+
+  // The Section timer picker lists every legal reference with a
+  // distinguishing label; unit symbols stay language-independent while the
+  // kind prose is localized.
+  await authorWorkspace.getByRole("tab", { name: "Details" }).press("Enter");
+  await expect(page.getByText("Selected Section")).toBeVisible();
+  await page
+    .getByRole("combobox", { name: "Duration" })
+    .selectOption("derived");
+  const timerVariableSelect = page.getByRole("combobox", {
+    name: "Timer Variable",
+  });
+  await expect(timerVariableSelect.locator("option")).toHaveText([
+    "Soak duration — min (duration)",
+    "Wait seconds — numeric",
+  ]);
+  await timerVariableSelect.selectOption("soakMinutes");
+
+  // Publishing requires the Unsigned Draft to be saved first.
+  await page.getByRole("button", { name: "Save", exact: true }).press("Enter");
+  await expect(page.getByRole("status")).toContainText(
+    "Unsigned Draft saved",
+    { timeout: 15_000 },
+  );
+
+  await page.evaluate(() => {
+    const files = new Map<string, string>();
+    Object.defineProperty(globalThis, "__publishedFiles", { value: files });
+    Object.defineProperty(globalThis, "showSaveFilePicker", {
+      value: async (options: { suggestedName: string }) => ({
+        name: options.suggestedName,
+        createWritable: async () => ({
+          write: async (bytes: Uint8Array) => {
+            files.set(
+              options.suggestedName,
+              new TextDecoder().decode(bytes),
+            );
+          },
+          close: async () => undefined,
+        }),
+      }),
+    });
+  });
+
+  const workspaceRail = page.getByRole("navigation", {
+    name: "Author workspace areas",
+  });
+  await workspaceRail.getByRole("button", { name: "Publish" }).press("Enter");
+  await page.getByLabel("Published HTML filename").fill(
+    "duration-timer.html",
+  );
+  await page.getByRole("button", { name: "Publish Protocol" }).press("Enter");
+  const publishDialog = page.getByRole("dialog", {
+    name: "Publish Protocol files?",
+  });
+  await publishDialog
+    .getByRole("button", { name: "Continue to File Picker" })
+    .press("Enter");
+  await expect(
+    page.getByRole("heading", { name: "Publication Complete" }),
+  ).toBeVisible();
+  const publishedFiles = await page.evaluate(() =>
+    [...(globalThis as typeof globalThis & {
+      __publishedFiles: Map<string, string>;
+    }).__publishedFiles.entries()],
+  );
+  expect(publishedFiles.map(([name]) => name)).toEqual([
+    "duration-timer.html",
+    "duration-timer.html.sha256",
+  ]);
+
+  const publishedPath = testInfo.outputPath("duration-timer.html");
+  await writeFile(publishedPath, publishedFiles[0]![1], "utf8");
+  await context.setOffline(true);
+  const publishedPage = await context.newPage();
+  await publishedPage.goto(pathToFileURL(publishedPath).href);
+  await expect(
+    publishedPage.getByRole("heading", { name: "Duration timer protocol" }),
+  ).toBeVisible();
+
+  // A resolved duration under one second keeps the Section in configuration
+  // with the same resolved-bound error as Numeric references.
+  const soakField = publishedPage.getByLabel("Soak duration");
+  const waitField = publishedPage.getByLabel("Wait seconds");
+  const configurationErrors = publishedPage.locator(".configuration-errors");
+  await waitField.fill("5");
+  await soakField.fill("0.0001");
+  await expect(configurationErrors).toContainText("1 second through 7 days");
+  await expect(
+    publishedPage.getByRole("button", { name: "Start Playback" }),
+  ).toBeDisabled();
+  await soakField.fill("2.5");
+  await expect(
+    publishedPage.getByRole("button", { name: "Start Playback" }),
+  ).toBeEnabled();
+  await publishedPage
+    .getByRole("button", { name: "Start Playback" })
+    .press("Enter");
+  await expect(
+    publishedPage
+      .getByRole("navigation", { name: "Reader progress" })
+      .locator('[aria-current="step"]'),
+  ).toHaveText("Playback");
+  // The Section timer runs from the configured value: 2.5 min → 150 s.
+  await expect(publishedPage.getByRole("timer")).toContainText("02:30");
+  await expect(
+    publishedPage.getByRole("button", { name: "Timer running" }),
+  ).toBeDisabled();
+  await publishedPage.close();
+});
+
+test("Author declares a Duration Derived Variable and sees dimension feedback", async ({
+  page,
+}, testInfo) => {
+  testInfo.setTimeout(90_000);
+  await page.addInitScript(() => {
+    localStorage.setItem("protocol-box:locale", "en");
+  });
+  await page.goto(pathToFileURL(`${process.cwd()}/dist/index.html`).href);
+  await createAuthorKey(page, "duration derived passphrase");
+  await expect(page.getByRole("heading", { name: "Unsigned Drafts" }))
+    .toBeVisible({ timeout: 15_000 });
+
+  await page
+    .getByRole("button", { name: "New Unsigned Draft" })
+    .first()
+    .press("Enter");
+  const newDraftDialog = page.getByRole("dialog", {
+    name: "New Unsigned Draft",
+  });
+  await newDraftDialog.getByLabel("Protocol title").fill("Duration derived");
+  await newDraftDialog
+    .getByRole("button", { name: "Create Unsigned Draft" })
+    .press("Enter");
+  await expect(
+    page.getByRole("navigation", { name: "Protocol Sections" }),
+  ).toBeVisible();
+
+  const authorWorkspace = page.getByRole("tablist", {
+    name: "Author workspace",
+  });
+  await authorWorkspace.getByRole("tab", { name: "Variables" }).press("Enter");
+
+  // The Duration Input operand.
+  await page.getByRole("button", { name: "Add Variable" }).press("Enter");
+  const variableForm = page
+    .locator('[data-slot="card"]')
+    .filter({ hasText: "New Variable Definition" });
+  await variableForm.getByLabel("Variable ID").fill("soakMinutes");
+  await variableForm.getByLabel("Label", { exact: true }).fill("Soak duration");
+  await variableForm.getByRole("combobox", { name: "Type" }).press("Enter");
+  await page.getByRole("option", { name: "Duration Input" }).press("Enter");
+  await variableForm.getByLabel("Default").fill("5");
+  await variableForm
+    .getByRole("button", { name: "Add Variable Definition" })
+    .press("Enter");
+
+  // The Duration Derived Variable defaults to minute and previews its
+  // formula result through the single domain formatter in the declared
+  // unit (5 minutes doubled -> 10 min).
+  await page.getByRole("button", { name: "Add Variable" }).press("Enter");
+  await variableForm.getByLabel("Variable ID").fill("doubleMinutes");
+  await variableForm
+    .getByLabel("Label", { exact: true })
+    .fill("Double duration");
+  await variableForm.getByRole("combobox", { name: "Type" }).press("Enter");
+  await page.getByRole("option", { name: "Duration Derived" }).press("Enter");
+  await expect(
+    variableForm.getByRole("combobox", { name: "Unit" }),
+  ).toHaveText("Minute (min)");
+  await variableForm.getByLabel("Formula", { exact: true }).fill(
+    "soakMinutes * 2",
+  );
+  const formulaPreview = page.getByRole("region", { name: "Formula preview" });
+  await expect(formulaPreview.getByTestId("formula-result")).toHaveText(
+    "10 min",
+  );
+  await variableForm
+    .getByRole("button", { name: "Add Variable Definition" })
+    .press("Enter");
+
+  const derivedRow = page
+    .getByRole("table", { name: "Variable Definitions" })
+    .getByRole("row")
+    .filter({ hasText: "doubleMinutes" });
+  await expect(derivedRow).toContainText("Derived (min)");
+  await expect(derivedRow).toContainText("soakMinutes * 2");
+
+  // An illegal dimension combination surfaces the distinct diagnostic
+  // through live inspection on the Publish readiness panel.
+  await page.getByRole("button", { name: "Add Variable" }).press("Enter");
+  await variableForm.getByLabel("Variable ID").fill("badTotal");
+  await variableForm.getByLabel("Label", { exact: true }).fill("Bad total");
+  await variableForm.getByRole("combobox", { name: "Type" }).press("Enter");
+  await page.getByRole("option", { name: "Duration Derived" }).press("Enter");
+  await variableForm.getByLabel("Formula", { exact: true }).fill(
+    "1 + soakMinutes",
+  );
+  await variableForm
+    .getByRole("button", { name: "Add Variable Definition" })
+    .press("Enter");
+
+  await page.getByRole("button", { name: "Save", exact: true }).press("Enter");
+  await expect(page.getByRole("status")).toContainText(
+    "Unsigned Draft saved",
+    { timeout: 15_000 },
+  );
+  await page
+    .getByRole("navigation", { name: "Author workspace areas" })
+    .getByRole("button", { name: "Publish" })
+    .press("Enter");
+  // The Publish readiness panel lists the live inspection error; the
+  // distinct dimension code itself is pinned by the domain tests.
+  await expect(
+    page
+      .getByRole("alert")
+      .filter({ hasText: "A formula cannot add a Duration to a number" }),
+  ).toBeVisible();
+});
+
+test("Formula Assistant previews a Duration Derived Variable as Readers see it", async ({
+  page,
+}, testInfo) => {
+  testInfo.setTimeout(90_000);
+  await page.addInitScript(() => {
+    localStorage.setItem("protocol-box:locale", "en");
+  });
+  await page.goto(pathToFileURL(`${process.cwd()}/dist/index.html`).href);
+  await createAuthorKey(page, "assistant duration passphrase");
+  await expect(page.getByRole("heading", { name: "Unsigned Drafts" }))
+    .toBeVisible({ timeout: 15_000 });
+
+  await page
+    .getByRole("button", { name: "New Unsigned Draft" })
+    .first()
+    .press("Enter");
+  const newDraftDialog = page.getByRole("dialog", {
+    name: "New Unsigned Draft",
+  });
+  await newDraftDialog.getByLabel("Protocol title").fill("Assistant duration");
+  await newDraftDialog
+    .getByRole("button", { name: "Create Unsigned Draft" })
+    .press("Enter");
+  await expect(
+    page.getByRole("navigation", { name: "Protocol Sections" }),
+  ).toBeVisible();
+
+  const authorWorkspace = page.getByRole("tablist", {
+    name: "Author workspace",
+  });
+  await authorWorkspace.getByRole("tab", { name: "Variables" }).press("Enter");
+
+  // The Duration Input operand defaults to 45 minutes.
+  await page.getByRole("button", { name: "Add Variable" }).press("Enter");
+  const variableForm = page
+    .locator('[data-slot="card"]')
+    .filter({ hasText: "New Variable Definition" });
+  await variableForm.getByLabel("Variable ID").fill("soakMinutes");
+  await variableForm.getByLabel("Label", { exact: true }).fill("Soak duration");
+  await variableForm.getByRole("combobox", { name: "Type" }).press("Enter");
+  await page.getByRole("option", { name: "Duration Input" }).press("Enter");
+  await variableForm.getByLabel("Default").fill("45");
+  await variableForm
+    .getByRole("button", { name: "Add Variable Definition" })
+    .press("Enter");
+
+  // The Duration Derived candidate picks Hour as its declared unit; the
+  // sample input stays in the operand's own declared unit and the preview
+  // renders through the single domain formatter (45 min doubled -> 1.5 h).
+  await page.getByRole("button", { name: "Add Variable" }).press("Enter");
+  await variableForm.getByLabel("Variable ID").fill("totalTime");
+  await variableForm.getByLabel("Label", { exact: true }).fill("Total time");
+  await variableForm.getByRole("combobox", { name: "Type" }).press("Enter");
+  await page.getByRole("option", { name: "Duration Derived" }).press("Enter");
+  await variableForm.getByRole("combobox", { name: "Unit" }).press("Enter");
+  await page.getByRole("option", { name: "Hour (h)" }).press("Enter");
+  await variableForm.getByLabel("Formula", { exact: true }).fill(
+    "soakMinutes * 2",
+  );
+
+  const formulaPreview = page.getByRole("region", { name: "Formula preview" });
+  await expect(formulaPreview.getByTestId("formula-result")).toHaveText(
+    "1.5 h",
+  );
+
+  // Editing the sample input re-evaluates deterministically (90 min doubled
+  // -> 3 h).
+  await formulaPreview
+    .getByLabel("Preview value for Soak duration (min)")
+    .fill("90");
+  await expect(formulaPreview.getByTestId("formula-result")).toHaveText("3 h");
+
+  await variableForm
+    .getByRole("button", { name: "Add Variable Definition" })
+    .press("Enter");
+  const derivedRow = page
+    .getByRole("table", { name: "Variable Definitions" })
+    .getByRole("row")
+    .filter({ hasText: "totalTime" });
+  await expect(derivedRow).toContainText("Derived (h)");
+  await expect(derivedRow).toContainText("soakMinutes * 2");
+});
+
+test("Help documents Duration Variables bilingually with declared-unit rounding", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    localStorage.setItem("protocol-box:locale", "en");
+  });
+  await page.goto(
+    `${pathToFileURL(`${process.cwd()}/dist/index.html`).href}#help/author/formulas`,
+  );
+  await expect(
+    page.getByRole("heading", {
+      name: "Formulas and Formula Test Cases",
+      level: 1,
+    }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Type Durations with a declared unit"),
+  ).toBeVisible();
+  await page.getByText("States and boundaries", { exact: true }).press("Enter");
+  await expect(
+    page.getByText("Declared-unit rounding", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText(/whole declared units, not whole seconds/),
+  ).toBeVisible();
+  await expect(page.getByText("Doubled soak duration")).toBeVisible();
+
+  const language = page.getByRole("combobox", { name: "Language" });
+  await language.press("Enter");
+  await page.getByRole("option", { name: "Simplified Chinese" }).press("Enter");
+  await expect(
+    page.getByRole("heading", { name: "公式与公式测试用例", level: 1 }),
+  ).toBeVisible();
+  await expect(page.getByText("为时长变量声明单位")).toBeVisible();
+  await expect(page.getByText("声明单位舍入", { exact: true })).toBeVisible();
+  await expect(page.getByText("浸泡时长加倍")).toBeVisible();
+
+  await page.goto(
+    `${pathToFileURL(`${process.cwd()}/dist/index.html`).href}#help/glossary`,
+  );
+  await expect(page.getByText("时长变量", { exact: true })).toBeVisible();
+  await expect(page.getByText("时长单位", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText(/以规范化秒计算/),
+  ).toBeVisible();
+});

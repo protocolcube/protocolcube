@@ -153,6 +153,14 @@ const glossaryEntries = [
     "help.glossary.derivedVariable.term",
     "help.glossary.derivedVariable.definition",
   ],
+  [
+    "help.glossary.durationVariable.term",
+    "help.glossary.durationVariable.definition",
+  ],
+  [
+    "help.glossary.durationUnit.term",
+    "help.glossary.durationUnit.definition",
+  ],
   ["help.glossary.variableValue.term", "help.glossary.variableValue.definition"],
   [
     "help.glossary.playbackSession.term",

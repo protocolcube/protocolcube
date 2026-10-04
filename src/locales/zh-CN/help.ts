@@ -96,6 +96,12 @@ export const help = {
   "help.glossary.derivedVariable.term": "派生变量",
   "help.glossary.derivedVariable.definition":
     "通过作者定义的公式从输入变量或其他派生变量计算变量值的变量定义。",
+  "help.glossary.durationVariable.term": "时长变量",
+  "help.glossary.durationVariable.definition":
+    "值表示时间长度的变量定义，按时长单位输入和呈现，并以规范化秒计算。",
+  "help.glossary.durationUnit.term": "时长单位",
+  "help.glossary.durationUnit.definition":
+    "作者声明用于输入和呈现时长变量值的时间单位——秒、分钟、小时或天。",
   "help.glossary.variableValue.term": "变量值",
   "help.glossary.variableValue.definition":
     "导引会话期间输入变量或派生变量的已解析值。",

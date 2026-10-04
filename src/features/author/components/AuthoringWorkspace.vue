@@ -11,8 +11,15 @@ import {
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
 import { useAuthorStore } from "@/features/author/store";
-import { ProtocolCore, type FormulaTestCase, type VariableDefinition } from "@/domain/protocol";
+import {
+  ProtocolCore,
+  type DurationUnit,
+  type FormulaTestCase,
+  type VariableDefinition,
+  isDurationUnit,
+} from "@/domain/protocol";
 import AccessibleDialog from "@/components/shared/AccessibleDialog.vue";
+import DurationUnitSelect from "@/features/author/components/DurationUnitSelect.vue";
 import FormulaAssistant from "@/features/author/components/FormulaAssistant.vue";
 import ResizableSeparator from "@/features/author/components/ResizableSeparator.vue";
 import VariableDependencyGraph from "@/features/author/components/VariableDependencyGraph.vue";
@@ -72,9 +79,13 @@ const outlineFocusIndex = ref(0);
 const inspectorFocusIndex = ref(0);
 const variableId = ref("");
 const variableLabel = ref("");
-const variableType = ref<"text" | "numeric" | "boolean" | "enum" | "derived">("text");
+const variableType = ref<"text" | "numeric" | "boolean" | "enum" | "duration" | "derived" | "duration-derived">("text");
 const variableFormula = ref("");
 const variableOptions = ref("");
+const variableUnit = ref<DurationUnit>("minute");
+const variableDefault = ref("");
+const variableMinimum = ref("");
+const variableMaximum = ref("");
 const variableFormOpen = ref(false);
 const testCaseName = ref("");
 const testCaseDescription = ref("");
@@ -95,6 +106,16 @@ const selectedVariable = computed(() => editing.value?.protocol.variables.find((
 const selectedTestCase = computed(() => editing.value?.protocol.formulaTestCases.find((testCase) => testCase.testCaseId === selectedTestCaseId.value));
 const inputVariableDefinitions = computed(() => editing.value?.protocol.variables.filter((variable) => variable.kind === "input") ?? []);
 const derivedVariableDefinitions = computed(() => editing.value?.protocol.variables.filter((variable) => variable.kind === "derived") ?? []);
+// Legal references for a derived Section duration: Derived Variables (any
+// valueType) plus Numeric and Duration Input Variables. ProtocolCore owns
+// the rule, so this picker can never drift from the
+// `invalid_duration_variable` inspection check.
+const sectionDurationCandidates = computed(() => editing.value?.protocol.variables.filter((variable) => ProtocolCore.isSectionDurationCandidate(variable)) ?? []);
+function sectionDurationCandidateLabel(variable: VariableDefinition): string {
+  if (variable.kind === "derived") return `${variable.label} — ${t("author.section.durationCandidate.derived")}`;
+  if (variable.valueType === "duration") return `${variable.label} — ${t("author.section.durationCandidate.duration", { unit: ProtocolCore.durationSymbol(variable.unit) })}`;
+  return `${variable.label} — ${t("author.section.durationCandidate.numeric")}`;
+}
 const dependencyGraph = computed(() => editing.value ? ProtocolCore.inspectVariableDependencyGraph(editing.value.protocol) : { nodes: [], edges: [], diagnostics: [] });
 const headingHierarchyWarning = computed(() => /^(?:#|##)\s+\S/m.test(section.value?.markdown ?? ""));
 const taskItemCount = computed(() => ProtocolCore.countTaskItems(section.value?.markdown ?? ""));
@@ -173,17 +194,49 @@ function closeVariableForm(): void {
   variableType.value = "text";
   variableFormula.value = "";
   variableOptions.value = "";
+  variableUnit.value = "minute";
+  variableDefault.value = "";
+  variableMinimum.value = "";
+  variableMaximum.value = "";
 }
-function addVariable(): void { if (!editing.value || !variableId.value || !variableLabel.value) { author.setStatus("Variable ID and label are required"); return; } let variable: VariableDefinition; if (variableType.value === "derived") variable = { kind: "derived", id: variableId.value, label: variableLabel.value, valueType: "numeric", formula: variableFormula.value, precision: 2, roundingMode: "half-even" }; else if (variableType.value === "enum") variable = { kind: "input", id: variableId.value, label: variableLabel.value, valueType: "enum", options: variableOptions.value.split(",").map((option) => option.trim()).filter(Boolean) }; else if (variableType.value === "boolean") variable = { kind: "input", id: variableId.value, label: variableLabel.value, valueType: "boolean" }; else if (variableType.value === "numeric") variable = { kind: "input", id: variableId.value, label: variableLabel.value, valueType: "numeric" }; else variable = { kind: "input", id: variableId.value, label: variableLabel.value, valueType: "text" }; author.replaceVariables([...editing.value.protocol.variables, variable]); selectedVariableId.value = variable.id; closeVariableForm(); }
+function durationEntryToSeconds(entry: string, unit: DurationUnit): string | undefined {
+  const trimmed = entry.trim();
+  if (trimmed === "") return undefined;
+  return ProtocolCore.convertDurationEntryToSeconds(trimmed, unit);
+}
+function addVariable(): void { if (!editing.value || !variableId.value || !variableLabel.value) { author.setStatus("Variable ID and label are required"); return; } let variable: VariableDefinition; if (variableType.value === "derived") variable = { kind: "derived", id: variableId.value, label: variableLabel.value, valueType: "numeric", formula: variableFormula.value, precision: 2, roundingMode: "half-even" }; else if (variableType.value === "duration-derived") variable = { kind: "derived", id: variableId.value, label: variableLabel.value, valueType: "duration", unit: variableUnit.value, formula: variableFormula.value, precision: 2, roundingMode: "half-even" }; else if (variableType.value === "duration") { let defaultValue: string | undefined; let minimum: string | undefined; let maximum: string | undefined; try { defaultValue = durationEntryToSeconds(variableDefault.value, variableUnit.value); minimum = durationEntryToSeconds(variableMinimum.value, variableUnit.value); maximum = durationEntryToSeconds(variableMaximum.value, variableUnit.value); } catch { author.setStatus(t("author.variable.invalidDurationEntry")); return; } variable = { kind: "input", id: variableId.value, label: variableLabel.value, valueType: "duration", unit: variableUnit.value, ...(defaultValue !== undefined ? { defaultValue } : {}), ...(minimum !== undefined ? { minimum } : {}), ...(maximum !== undefined ? { maximum } : {}) }; } else if (variableType.value === "enum") variable = { kind: "input", id: variableId.value, label: variableLabel.value, valueType: "enum", options: variableOptions.value.split(",").map((option) => option.trim()).filter(Boolean) }; else if (variableType.value === "boolean") variable = { kind: "input", id: variableId.value, label: variableLabel.value, valueType: "boolean" }; else if (variableType.value === "numeric") variable = { kind: "input", id: variableId.value, label: variableLabel.value, valueType: "numeric" }; else variable = { kind: "input", id: variableId.value, label: variableLabel.value, valueType: "text" }; author.replaceVariables([...editing.value.protocol.variables, variable]); selectedVariableId.value = variable.id; closeVariableForm(); }
 function removeVariable(id: string): void { if (editing.value) author.replaceVariables(editing.value.protocol.variables.filter((variable) => variable.id !== id)); }
 function updateVariable(id: string, update: (variable: VariableDefinition) => VariableDefinition): void { if (editing.value) author.replaceVariables(editing.value.protocol.variables.map((variable) => variable.id === id ? update(variable) : variable)); }
 function updateVariableLabel(id: string, label: string): void { updateVariable(id, (variable) => ({ ...variable, label })); }
 function updateVariableDetail(id: string, value: string | boolean): void { updateVariable(id, (variable) => variable.kind === "derived" ? { ...variable, formula: String(value) } : variable.valueType === "enum" ? { ...variable, options: String(value).split(",").map((option) => option.trim()).filter(Boolean) } : variable.valueType === "boolean" ? { ...variable, defaultValue: Boolean(value) } : { ...variable, defaultValue: String(value) }); }
+function updateDurationUnit(id: string, unit: string): void { if (!isDurationUnit(unit)) return; updateVariable(id, (variable) => variable.valueType === "duration" ? { ...variable, unit } : variable); }
+function updateDurationDetail(id: string, field: "defaultValue" | "minimum" | "maximum", entry: string): void {
+  updateVariable(id, (variable) => {
+    if (variable.kind !== "input" || variable.valueType !== "duration") return variable;
+    if (entry.trim() === "") {
+      const { [field]: omitted, ...rest } = variable;
+      return rest;
+    }
+    try {
+      if (!isDurationUnit(variable.unit)) return variable;
+      return { ...variable, [field]: ProtocolCore.convertDurationEntryToSeconds(entry.trim(), variable.unit) };
+    } catch {
+      // Mid-typing entries that are not yet finite decimals are ignored; the
+      // stored definition keeps its last valid canonical seconds value.
+      return variable;
+    }
+  });
+}
+function durationDetailEntry(seconds: string | undefined, unit: string): string {
+  if (seconds === undefined) return "";
+  return isDurationUnit(unit) ? ProtocolCore.convertDurationSecondsToUnit(seconds, unit) : seconds;
+}
 function updateFormulaTestCase(id: string, update: Partial<FormulaTestCase>): void { if (editing.value) author.replaceFormulaTestCases(editing.value.protocol.formulaTestCases.map((testCase) => testCase.testCaseId === id ? { ...testCase, ...update } : testCase)); }
 function removeFormulaTestCase(id: string): void { if (editing.value) author.replaceFormulaTestCases(editing.value.protocol.formulaTestCases.filter((testCase) => testCase.testCaseId !== id)); }
 function initialTestInputValue(variable: Extract<VariableDefinition, { kind: "input" }>): string | boolean {
   if (variable.valueType === "boolean") return variable.defaultValue ?? false;
   if (variable.valueType === "enum") return variable.defaultValue ?? variable.options[0] ?? "";
+  if (variable.valueType === "duration") return durationDetailEntry(variable.defaultValue, variable.unit);
   return variable.defaultValue ?? "";
 }
 function openFormulaTestCaseForm(): void {
@@ -900,13 +953,60 @@ function updateTitle(event: Event): void { if (editing.value) { authoringDirty.v
                         <SelectGroup>
                           <SelectItem value="text">Text Input</SelectItem>
                           <SelectItem value="numeric">Numeric Input</SelectItem>
+                          <SelectItem value="duration">{{ t("author.variable.kind.duration") }}</SelectItem>
                           <SelectItem value="boolean">Boolean Input</SelectItem>
                           <SelectItem value="enum">Enum Input</SelectItem>
                           <SelectItem value="derived">Numeric Derived</SelectItem>
+                          <SelectItem value="duration-derived">{{ t("author.variable.kind.durationDerived") }}</SelectItem>
                         </SelectGroup>
                       </SelectContent>
                     </Select>
                   </Field>
+                  <Field v-if="variableType === 'duration' || variableType === 'duration-derived'">
+                    <FieldLabel for="new-variable-unit">{{ t("author.variable.unit") }}</FieldLabel>
+                    <Select v-model="variableUnit">
+                      <SelectTrigger id="new-variable-unit" class="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectGroup>
+                          <SelectItem value="second">{{ t("author.variable.durationUnit.second") }}</SelectItem>
+                          <SelectItem value="minute">{{ t("author.variable.durationUnit.minute") }}</SelectItem>
+                          <SelectItem value="hour">{{ t("author.variable.durationUnit.hour") }}</SelectItem>
+                          <SelectItem value="day">{{ t("author.variable.durationUnit.day") }}</SelectItem>
+                        </SelectGroup>
+                      </SelectContent>
+                    </Select>
+                  </Field>
+                  <template v-if="variableType === 'duration'">
+                    <Field>
+                      <FieldLabel for="new-variable-default">{{ t("author.variable.defaultValue") }}</FieldLabel>
+                      <Input
+                        id="new-variable-default"
+                        v-model="variableDefault"
+                        inputmode="decimal"
+                        placeholder="5"
+                      />
+                    </Field>
+                    <Field>
+                      <FieldLabel for="new-variable-minimum">{{ t("author.variable.minimum") }}</FieldLabel>
+                      <Input
+                        id="new-variable-minimum"
+                        v-model="variableMinimum"
+                        inputmode="decimal"
+                        placeholder="0"
+                      />
+                    </Field>
+                    <Field>
+                      <FieldLabel for="new-variable-maximum">{{ t("author.variable.maximum") }}</FieldLabel>
+                      <Input
+                        id="new-variable-maximum"
+                        v-model="variableMaximum"
+                        inputmode="decimal"
+                        placeholder="60"
+                      />
+                    </Field>
+                  </template>
                   <Field v-if="variableType === 'enum'">
                     <FieldLabel for="new-variable-options">Options</FieldLabel>
                     <Input
@@ -915,7 +1015,7 @@ function updateTitle(event: Event): void { if (editing.value) { authoringDirty.v
                       placeholder="low, medium, high"
                     />
                   </Field>
-                  <Field v-if="variableType === 'derived'" class="definition-form-span">
+                  <Field v-if="variableType === 'derived' || variableType === 'duration-derived'" class="definition-form-span">
                     <FieldLabel for="new-variable-formula">Formula</FieldLabel>
                     <Input
                       id="new-variable-formula"
@@ -925,10 +1025,12 @@ function updateTitle(event: Event): void { if (editing.value) { authoringDirty.v
                   </Field>
                 </FieldGroup>
                 <FormulaAssistant
-                  v-if="variableType === 'derived' && editing"
+                  v-if="(variableType === 'derived' || variableType === 'duration-derived') && editing"
                   :protocol="editing.protocol"
                   :variable-id="variableId"
                   :formula="variableFormula"
+                  :value-type="variableType === 'duration-derived' ? 'duration' : 'numeric'"
+                  :unit="variableUnit"
                   @learn="openHelp('author/formulas')"
                 />
               </CardContent>
@@ -972,14 +1074,16 @@ function updateTitle(event: Event): void { if (editing.value) { authoringDirty.v
               >
                 <TableCell class="mono font-semibold">{{ variable.id }}</TableCell>
                 <TableCell>{{ variable.label }}</TableCell>
-                <TableCell>{{ variable.kind === "derived" ? "Derived" : variable.valueType }}</TableCell>
+                <TableCell>{{ variable.kind === "derived" ? (variable.valueType === "duration" ? `Derived (${ProtocolCore.durationSymbol(variable.unit)})` : "Derived") : variable.valueType === "duration" ? `duration (${ProtocolCore.durationSymbol(variable.unit)})` : variable.valueType }}</TableCell>
                 <TableCell class="mono">
                   {{
                     variable.kind === "derived"
                       ? variable.formula
                       : variable.valueType === "enum"
                         ? variable.options.join(", ")
-                        : variable.defaultValue ?? "—"
+                        : variable.valueType === "duration"
+                          ? durationDetailEntry(variable.defaultValue, variable.unit) || "—"
+                          : variable.defaultValue ?? "—"
                   }}
                 </TableCell>
               </TableRow>
@@ -1100,8 +1204,8 @@ function updateTitle(event: Event): void { if (editing.value) { authoringDirty.v
                         :id="`test-input-${variable.id}`"
                         :model-value="String(testInputValues[variable.id] ?? '')"
                         @update:model-value="testInputValues[variable.id] = String($event)"
-                        :class="variable.valueType === 'numeric' ? 'font-mono' : undefined"
-                        :inputmode="variable.valueType === 'numeric' ? 'decimal' : undefined"
+                        :class="variable.valueType === 'numeric' || variable.valueType === 'duration' ? 'font-mono' : undefined"
+                        :inputmode="variable.valueType === 'numeric' || variable.valueType === 'duration' ? 'decimal' : undefined"
                       />
                     </Field>
                   </FieldGroup>
@@ -1119,6 +1223,7 @@ function updateTitle(event: Event): void { if (editing.value) { authoringDirty.v
                       <FieldLabel :for="`test-expected-${variable.id}`">
                         {{ variable.label }}
                         <code>{{ variable.id }}</code>
+                        <code v-if="variable.valueType === 'duration'">seconds</code>
                       </FieldLabel>
                       <Input
                         :id="`test-expected-${variable.id}`"
@@ -1237,7 +1342,7 @@ function updateTitle(event: Event): void { if (editing.value) { authoringDirty.v
           >
         </label>
         <label v-else-if="section.duration.kind === 'derived'">
-          Numeric Derived Variable
+          {{ t("author.section.timerVariable") }}
           <select
             :value="section.duration.variableId"
             @change="updateSectionDuration(
@@ -1246,13 +1351,11 @@ function updateTitle(event: Event): void { if (editing.value) { authoringDirty.v
             )"
           >
             <option
-              v-for="variable in editing?.protocol.variables.filter(
-                candidate => candidate.kind === 'derived',
-              )"
+              v-for="variable in sectionDurationCandidates"
               :key="variable.id"
               :value="variable.id"
             >
-              {{ variable.label }}
+              {{ sectionDurationCandidateLabel(variable) }}
             </option>
           </select>
         </label>
@@ -1326,6 +1429,13 @@ function updateTitle(event: Event): void { if (editing.value) { authoringDirty.v
             >
           </label>
           <template v-if="selectedVariable.kind === 'derived'">
+            <label v-if="selectedVariable.valueType === 'duration'">
+              {{ t("author.variable.unit") }}
+              <DurationUnitSelect
+                :unit="selectedVariable.unit"
+                @change="updateDurationUnit(selectedVariable.id, $event)"
+              />
+            </label>
             <label>
               Formula
               <input
@@ -1342,6 +1452,8 @@ function updateTitle(event: Event): void { if (editing.value) { authoringDirty.v
               :protocol="editing.protocol"
               :variable-id="selectedVariable.id"
               :formula="selectedVariable.formula"
+              :value-type="selectedVariable.valueType"
+              :unit="selectedVariable.valueType === 'duration' ? selectedVariable.unit : 'minute'"
               @learn="openHelp('author/formulas')"
             />
           </template>
@@ -1355,6 +1467,51 @@ function updateTitle(event: Event): void { if (editing.value) { authoringDirty.v
               )"
             >
           </label>
+          <template v-else-if="selectedVariable.valueType === 'duration'">
+            <label>
+              {{ t("author.variable.unit") }}
+              <DurationUnitSelect
+                :unit="selectedVariable.unit"
+                @change="updateDurationUnit(selectedVariable.id, $event)"
+              />
+            </label>
+            <label>
+              {{ t("author.variable.defaultValue") }} ({{ ProtocolCore.durationSymbol(selectedVariable.unit) }})
+              <input
+                inputmode="decimal"
+                :value="durationDetailEntry(selectedVariable.defaultValue, selectedVariable.unit)"
+                @input="updateDurationDetail(
+                  selectedVariable.id,
+                  'defaultValue',
+                  ($event.target as HTMLInputElement).value,
+                )"
+              >
+            </label>
+            <label>
+              {{ t("author.variable.minimum") }} ({{ ProtocolCore.durationSymbol(selectedVariable.unit) }})
+              <input
+                inputmode="decimal"
+                :value="durationDetailEntry(selectedVariable.minimum, selectedVariable.unit)"
+                @input="updateDurationDetail(
+                  selectedVariable.id,
+                  'minimum',
+                  ($event.target as HTMLInputElement).value,
+                )"
+              >
+            </label>
+            <label>
+              {{ t("author.variable.maximum") }} ({{ ProtocolCore.durationSymbol(selectedVariable.unit) }})
+              <input
+                inputmode="decimal"
+                :value="durationDetailEntry(selectedVariable.maximum, selectedVariable.unit)"
+                @input="updateDurationDetail(
+                  selectedVariable.id,
+                  'maximum',
+                  ($event.target as HTMLInputElement).value,
+                )"
+              >
+            </label>
+          </template>
           <label v-else-if="selectedVariable.valueType === 'boolean'" class="check-label">
             <input
               type="checkbox"

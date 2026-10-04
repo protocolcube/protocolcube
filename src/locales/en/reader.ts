@@ -184,6 +184,10 @@ export const reader = {
     "The Variable Value for {variable} does not meet its declared type or constraints.",
   "reader.error.invalidDuration":
     "A resolved Section duration must be from 1 second through 7 days.",
+  "reader.error.invalidDurationVariable":
+    "A Section duration must reference a Numeric or Duration Variable.",
+  "reader.error.invalidDurationUnit":
+    "The Duration Unit declared for {variable} is not supported.",
   "reader.error.webCrypto":
     "Web Crypto is unavailable; Signature Match cannot be checked.",
   "reader.error.invalidSession":

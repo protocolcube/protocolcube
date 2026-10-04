@@ -544,6 +544,10 @@ const english: AuthorGuideContent = {
           body: "min and max accept numeric arguments. round accepts a value and optional 0-100 decimal places. ceil and floor accept one value.",
         },
         {
+          title: "Type Durations with a declared unit",
+          body: "Duration Variables declare second, minute, hour, or day and every stored value is canonical seconds. Formulas stay unit-free: duration + or - duration stays a duration; a number times a duration is a duration in either order; duration divided by a number is a duration; duration divided by duration is a number. Mixed-type addition, subtraction, and division, duration times duration, and min or max over mixed argument types are rejected. round, ceil, and floor keep the operand's type, and rounding happens in the derived variable's own declared unit.",
+        },
+        {
           title: "Preview representative inputs",
           body: "Enter numeric preview values and read either the calculated result or the exact structured error from Protocol Core.",
         },
@@ -564,6 +568,11 @@ const english: AuthorGuideContent = {
           action: "Choose expectations that match the declared precision.",
         },
         {
+          label: "Declared-unit rounding",
+          meaning: "A Duration Derived Variable is evaluated and rounded in its own declared unit, so round(value, 0) produces whole declared units, not whole seconds. A negative final duration is rejected.",
+          action: "Write Formula Test Case expectations for duration results as canonical seconds.",
+        },
+        {
           label: "Cycle or division by zero",
           meaning: "The Formula cannot produce a valid value.",
           action: "Break the dependency cycle or revise the denominator before publishing.",
@@ -579,6 +588,11 @@ const english: AuthorGuideContent = {
           title: "Diluent volume",
           body: "Reference the first Derived Variable from a second Formula.",
           code: "round(finalVolume - stockVolume, 2)",
+        },
+        {
+          title: "Doubled soak duration",
+          body: "With soakMinutes declared in minutes, soakMinutes * 2 is rounded in the declared unit and stored as canonical seconds. The Formula Assistant, Author Preview, and Readers all present it through one formatter, for example 1.5 h when the declared unit is hour.",
+          code: "soakMinutes * 2",
         },
         {
           title: "Formula Test Case Input Values",
@@ -1249,6 +1263,10 @@ const simplifiedChinese: AuthorGuideContent = {
           body: "min 和 max 接受数字参数；round 接受值和可选的 0-100 位小数；ceil 和 floor 各接受一个值。",
         },
         {
+          title: "为时长变量声明单位",
+          body: "时长变量声明秒、分钟、小时或天，所有存储值都是规范化秒。公式本身不带单位：时长 + 或 - 时长仍是时长；数字与时长相乘无论顺序都得到时长；时长除以数字得到时长；时长除以时长得到数字。跨类型的加法、减法和除法、时长乘时长，以及 min 或 max 混用不同类型的参数都会被拒绝。round、ceil 和 floor 保留操作数的类型，舍入在派生变量自己的声明单位内进行。",
+        },
+        {
           title: "预览代表性输入",
           body: "输入数字预览值，读取规程核心给出的计算结果或精确结构化错误。",
         },
@@ -1269,6 +1287,11 @@ const simplifiedChinese: AuthorGuideContent = {
           action: "让预期结果与声明精度一致。",
         },
         {
+          label: "声明单位舍入",
+          meaning: "时长派生变量在自己的声明单位内求值和舍入，因此 round(value, 0) 得到整数个声明单位，而不是整数秒。最终的负时长会被拒绝。",
+          action: "时长结果的公式测试用例预期要写成规范化秒。",
+        },
+        {
           label: "循环或除零",
           meaning: "公式无法产生有效值。",
           action: "发布前打破依赖循环或修正分母。",
@@ -1284,6 +1307,11 @@ const simplifiedChinese: AuthorGuideContent = {
           title: "稀释液体积",
           body: "第二个公式引用第一个派生变量。",
           code: "round(finalVolume - stockVolume, 2)",
+        },
+        {
+          title: "浸泡时长加倍",
+          body: "soakMinutes 以分钟声明时，soakMinutes * 2 按声明单位舍入并存储为规范化秒。公式助手、作者预览和阅读者都通过同一个格式化函数呈现该值，例如声明单位为小时时显示 1.5 h。",
+          code: "soakMinutes * 2",
         },
         {
           title: "公式测试用例输入值",
